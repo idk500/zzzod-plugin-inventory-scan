@@ -45,6 +45,8 @@ class InventoryScanApp(ZApplication):
         self.screenshot_cache = ScreenshotCache(save_dir=self.screenshots_dir, debug_mode=False)
 
         self.ocr_worker = OcrWorker(ctx)
+        # 音擎导航的逃逸只做一次标记
+        self._wengine_escaped: bool = False
 
         self.drive_disk_scanner = DriveDiskScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
         self.wengine_scanner = WengineScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
@@ -108,11 +110,14 @@ class InventoryScanApp(ZApplication):
         if not self._scan_wengine:
             self.ocr_worker.resume()
             return self.round_success('跳过音擎')
-        op = BackToNormalWorld(self.ctx)
-        back_result = self.round_by_op_result(op.execute())
-        if not back_result.is_success:
-            self.ocr_worker.resume()
-            return back_result
+        # 逃逸只做一次: goto 中间态会重入本节点 每轮逃逸会把上轮打开的菜单关掉形成死循环
+        if not self._wengine_escaped:
+            op = BackToNormalWorld(self.ctx)
+            back_result = self.round_by_op_result(op.execute())
+            if not back_result.is_success:
+                self.ocr_worker.resume()
+                return back_result
+            self._wengine_escaped = True
         result = self.round_by_goto_screen(screen=self.screenshot(), screen_name='仓库-音擎仓库')
         if result.is_success or result.is_fail:
             self.ocr_worker.resume()
