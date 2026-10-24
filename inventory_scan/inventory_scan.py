@@ -159,7 +159,8 @@ class InventoryScanApp(ZApplication):
             self.ocr_worker.resume()
             return self.round_success('已到达代理人界面')
 
-        return self.round_retry(wait=0.1)
+        # 游戏会记住上次停留的子页 不在基础页就直接点基础页签
+        return self.round_by_find_and_click_area(screen, '代理人-信息', '按钮-代理人基础', success_wait=1)
 
     def _is_button_colorful(self, screen, screen_name: str, area_name: str) -> bool:
         """
