@@ -302,8 +302,11 @@ class AgentScanApp(ZApplication):
 
         try:
             # 保存到代理人缓存（调试模式下会同时保存到文件）
-            index = self.screenshot_cache.save('agent', combined)
+                        # 按内容去重保存 重扫产生的相同面板只入库一次
+            index, dup = self.screenshot_cache.save_unique('agent', combined)
             self.screenshot_index = index + 1
+            if dup:
+                return
 
             # 提交OCR任务（异步处理）
             if self.ocr_worker is not None:
