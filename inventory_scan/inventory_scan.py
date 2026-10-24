@@ -51,7 +51,13 @@ class InventoryScanApp(ZApplication):
         self.agent_scanner = AgentScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
 
     @operation_node(name='开始前返回', is_start_node=True)
+    def back_at_first(self) -> OperationRoundResult:
+        """返回大世界"""
+        op = BackToNormalWorld(self.ctx)
+        return self.round_by_op_result(op.execute())
+
     def _ensure_plugin_assets(self) -> None:
+        """插件自带资产合并到工作目录 识别管线与 wiki 图标库供框架按工作目录路径加载"""
         """插件自带资产合并到工作目录 识别管线与 wiki 图标库供框架按工作目录路径加载"""
         plugin_assets = Path(__file__).parent / "assets"
         dst_pipelines = Path(os_utils.get_path_under_work_dir("assets", "image_analysis_pipelines"))
