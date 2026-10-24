@@ -57,6 +57,11 @@ class DriveDiskScanApp(ZApplication):
         # 本次扫描的导出文件路径
         self.export_path: Optional[str] = None
 
+        # 滚动翻页安全阀
+        self.scroll_rounds: int = 0
+        self._last_page_sig = None
+        self._stuck_rounds: int = 0
+
     def execute(self) -> OperationResult:
         """执行扫描"""
         try:
@@ -225,14 +230,27 @@ class DriveDiskScanApp(ZApplication):
                     log.debug("点击完成，扫描结束")
                     return self.round_success('扫描完成')
             else:
-                # 无进度条：点击(4,1)触发滚动
+                # 无进度条：滚轮向下翻页(三重安全阀: 签名判重/连续未动/轮数上限)
                 if len(self.grid_rows) > 3 and len(self.grid_rows[3]) > 0:
+                    self.scroll_rounds += 1
+                    if self.scroll_rounds > 80:
+                        log.warning(f"滚动轮数达到上限 {self.scroll_rounds}，强制结束扫描")
+                        return self.round_success('扫描完成')
+                    sig = self._page_signature()
+                    if sig is not None and sig == self._last_page_sig:
+                        self._stuck_rounds += 1
+                    else:
+                        self._stuck_rounds = 0
+                    self._last_page_sig = sig
+                    if self._stuck_rounds >= 2:
+                        log.info(f"连续 {self._stuck_rounds} 轮页面未变化，判定已到列表底部，结束扫描")
+                        return self.round_success('扫描完成')
                     target = self.grid_rows[3][0]
-                    log.debug("[点击] 无进度条，点击(3,0)触发滚动")
-                    self.ctx.controller.click(target)
+                    self.ctx.controller.scroll(3, target)
+                    log.debug(f"[滚动] 第{self.scroll_rounds}轮滚轮翻页")
                     self.current_row_idx = 2
                     self.current_col_idx = 0
-                    return self.round_success('滚动', wait=0.4)
+                    return self.round_success('滚动', wait=0.6)
                 else:
                     log.debug("点击完成，扫描结束")
                     return self.round_success('扫描完成')
@@ -284,6 +302,27 @@ class DriveDiskScanApp(ZApplication):
     def on_resume(self):
         """恢复"""
         super().on_resume()
+
+    def _page_signature(self):
+        """第一行格子区域的像素均值签名 用于判断列表是否真的滚动了"""
+        try:
+            if not self.grid_rows or not self.grid_rows[0]:
+                return None
+            screen = self.last_screenshot
+            if screen is None:
+                return None
+            first_row = self.grid_rows[0]
+            x1 = max(0, int(first_row[0].x - 60))
+            x2 = int(first_row[-1].x + 60)
+            y = int(first_row[0].y)
+            region = screen[max(0, y - 40):y + 40, x1:x2]
+            if region.size == 0:
+                return None
+            import cv2
+            mean = cv2.mean(region)
+            return tuple(round(v, 1) for v in mean[:3])
+        except Exception:
+            return None
 
 
 def __debug():
