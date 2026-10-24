@@ -56,31 +56,6 @@ class InventoryScanApp(ZApplication):
         op = BackToNormalWorld(self.ctx)
         return self.round_by_op_result(op.execute())
 
-    def _ensure_plugin_assets(self) -> None:
-        """插件自带资产合并到工作目录 识别管线与 wiki 图标库供框架按工作目录路径加载"""
-        """插件自带资产合并到工作目录 识别管线与 wiki 图标库供框架按工作目录路径加载"""
-        plugin_assets = Path(__file__).parent / "assets"
-        dst_pipelines = Path(os_utils.get_path_under_work_dir("assets", "image_analysis_pipelines"))
-        dst_pipelines.mkdir(parents=True, exist_ok=True)
-        for yml in (plugin_assets / "image_analysis_pipelines").iterdir():
-            target = dst_pipelines / yml.name
-            if not target.exists():
-                shutil.copy2(yml, target)
-        dst_wiki = Path(os_utils.get_path_under_work_dir("assets", "wiki_data"))
-        dst_wiki.mkdir(parents=True, exist_ok=True)
-        for item in (plugin_assets / "wiki_data").iterdir():
-            target = dst_wiki / item.name
-            if item.is_dir():
-                if not target.exists():
-                    shutil.copytree(item, target)
-            elif not target.exists():
-                shutil.copy2(item, target)
-
-    def back_at_first(self) -> OperationRoundResult:
-        """返回大世界"""
-        op = BackToNormalWorld(self.ctx)
-        return self.round_by_op_result(op.execute())
-
     @node_from(from_name='开始前返回')
     @operation_node(name='准备截图文件夹')
     def prepare_screenshots_dir(self) -> OperationRoundResult:
@@ -261,3 +236,19 @@ class InventoryScanApp(ZApplication):
         except Exception as e:
             log.error(f'导出完整数据失败: {e}')
             return self.round_fail(f'导出失败: {e}')
+
+    def _ensure_plugin_assets(self) -> None:
+        """插件自带资产合并到工作目录 识别管线与 wiki 图标库供框架按工作目录路径加载"""
+        plugin_assets = Path(__file__).parent / "assets"
+        dst_pipelines = Path(os_utils.get_path_under_work_dir("assets", "image_analysis_pipelines"))
+        dst_pipelines.mkdir(parents=True, exist_ok=True)
+        for yml in (plugin_assets / "image_analysis_pipelines").iterdir():
+            target = dst_pipelines / yml.name
+            if not target.exists():
+                shutil.copy2(yml, target)
+        dst_wiki = Path(os_utils.get_path_under_work_dir("assets", "wiki_data"))
+        dst_wiki.mkdir(parents=True, exist_ok=True)
+        for item in (plugin_assets / "wiki_data").iterdir():
+            target = dst_wiki / item.name
+            if not target.exists():
+                shutil.copy2(item, target)
