@@ -113,7 +113,7 @@ class InventoryScanApp(ZApplication):
         if not back_result.is_success:
             self.ocr_worker.resume()
             return back_result
-        result = self.round_by_goto_screen(screen_name='仓库-音擎仓库')
+        result = self.round_by_goto_screen(screen=self.screenshot(), screen_name='仓库-音擎仓库')
         if result.is_success or result.is_fail:
             self.ocr_worker.resume()
         return result

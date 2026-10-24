@@ -48,6 +48,7 @@ class ScreenshotCache:
 
         # 已入库内容的去重索引 (类型 -> 内容md5 -> 首次保存索引)
         self._seen_hash: dict[str, dict[str, int]] = {}
+        self._new_counts: dict[str, int] = {}
 
         if self.save_dir is not None:
             os.makedirs(self.save_dir, exist_ok=True)
@@ -198,6 +199,7 @@ class ScreenshotCache:
         self._wengine_index = 0
         self._agent_index = 0
         self._seen_hash.clear()
+        self._new_counts.clear()
         
         log.info("已清空所有缓存并重置索引")
 
@@ -223,4 +225,11 @@ class ScreenshotCache:
 
         index = self.save(cache_type, screenshot)
         seen[digest] = index
+        self._new_counts[cache_type] = self._new_counts.get(cache_type, 0) + 1
         return index, False
+
+
+
+    def get_new_count(self, cache_type: str) -> int:
+        """本轮累计的新增(非重复)入库数 reset_all 后归零"""
+        return self._new_counts.get(cache_type, 0)
