@@ -59,8 +59,8 @@ class DriveDiskScanApp(ZApplication):
 
         # 滚动翻页安全阀
         self.scroll_rounds: int = 0
-        self._last_page_sig = None
-        self._stuck_rounds: int = 0
+        self._all_dup_rounds: int = 0
+        self._last_scroll_new_count: int = 0
 
     def execute(self) -> OperationResult:
         """执行扫描"""
@@ -228,14 +228,19 @@ class DriveDiskScanApp(ZApplication):
         if self.scroll_rounds > 400:
             log.warning(f"滚动轮数达到上限 {self.scroll_rounds}，强制结束扫描")
             return self.round_success('扫描完成')
-        sig = self._page_signature()
-        if sig is not None and sig == self._last_page_sig:
-            self._stuck_rounds += 1
+        # 整页零新增判定：本轮扫到的格子全部已入库 说明列表没有前进 已到底
+        if self.screenshot_cache is not None:
+            new_count = self.screenshot_cache.get_new_count('drive_disk')
         else:
-            self._stuck_rounds = 0
-        self._last_page_sig = sig
-        if self._stuck_rounds >= 2:
-            log.info(f"连续 {self._stuck_rounds} 轮页面未变化，判定已到列表底部，结束扫描")
+            new_count = self._last_scroll_new_count + 1
+        new_since = new_count - self._last_scroll_new_count
+        self._last_scroll_new_count = new_count
+        if new_since == 0:
+            self._all_dup_rounds += 1
+        else:
+            self._all_dup_rounds = 0
+        if self._all_dup_rounds >= 2:
+            log.info(f"连续 {self._all_dup_rounds} 轮整页无新增，判定已到列表底部，结束扫描")
             return self.round_success('扫描完成')
         scroll_pos = self.grid_rows[-1][0] if self.grid_rows else Point(960, 540)
         self.ctx.controller.scroll(3, scroll_pos)
@@ -283,27 +288,6 @@ class DriveDiskScanApp(ZApplication):
     def on_resume(self):
         """恢复"""
         super().on_resume()
-
-    def _page_signature(self):
-        """第一行格子区域的像素均值签名 用于判断列表是否真的滚动了"""
-        try:
-            if not self.grid_rows or not self.grid_rows[0]:
-                return None
-            screen = self.last_screenshot
-            if screen is None:
-                return None
-            first_row = self.grid_rows[0]
-            x1 = max(0, int(first_row[0].x - 60))
-            x2 = int(first_row[-1].x + 60)
-            y = int(first_row[0].y)
-            region = screen[max(0, y - 40):y + 40, x1:x2]
-            if region.size == 0:
-                return None
-            import cv2
-            mean = cv2.mean(region)
-            return tuple(round(v, 1) for v in mean[:3])
-        except Exception:
-            return None
 
 
 def __debug():
