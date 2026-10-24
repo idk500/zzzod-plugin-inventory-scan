@@ -1,0 +1,11 @@
+[project]
+name = "zzzod-plugin-life-on-line"
+version = "0.1.0"
+description = "Life on Line plugin for ZenlessZoneZero-OneDragon (migrated from built-in app)"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "GPL-3.0" }
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
