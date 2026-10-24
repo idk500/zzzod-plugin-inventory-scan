@@ -1,9 +1,7 @@
 import os
 import shutil
-import time
 
 from one_dragon.base.operation.application import application_const
-from one_dragon.base.geometry.point import Point
 from one_dragon.base.operation.operation_edge import node_from
 from one_dragon.base.operation.operation_node import operation_node
 from one_dragon.base.operation.operation_round_result import OperationRoundResult
@@ -103,14 +101,18 @@ class InventoryScanApp(ZApplication):
         """导航到音擎界面
 
         上游 仓库-驱动仓库 的画面定义没有到 仓库-音擎仓库 的跳转边,
-        直接按 1080p 坐标点击页签 TAB-音擎, 再等画面识别确认。
+        页签坐标点击实测也不生效, 所以先返回大世界,
+        再走路由进音擎仓库(应用启动导航验证过这条路)。
         """
         self.ocr_worker.pause()
         if not self._scan_wengine:
             self.ocr_worker.resume()
             return self.round_success('跳过音擎')
-        self.ctx.controller.click(Point(1451, 168))
-        time.sleep(1)
+        op = BackToNormalWorld(self.ctx)
+        back_result = self.round_by_op_result(op.execute())
+        if not back_result.is_success:
+            self.ocr_worker.resume()
+            return back_result
         result = self.round_by_goto_screen(screen_name='仓库-音擎仓库')
         if result.is_success or result.is_fail:
             self.ocr_worker.resume()
