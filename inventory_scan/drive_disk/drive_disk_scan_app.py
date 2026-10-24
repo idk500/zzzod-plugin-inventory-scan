@@ -93,8 +93,11 @@ class DriveDiskScanApp(ZApplication):
             cropped = cv2_utils.crop_image_only(screenshot, storage_area.rect)
 
             # 保存到驱动盘缓存（调试模式下会同时保存到文件）
-            index = self.screenshot_cache.save('drive_disk', cropped)
+                        # 按内容去重保存 翻页重叠或误点产生的相同详情只入库一次
+            index, dup = self.screenshot_cache.save_unique('drive_disk', cropped)
             self.screenshot_index = index + 1
+            if dup:
+                return
 
             # 提交OCR任务（异步处理）
             if self.ocr_worker is not None:
@@ -167,7 +170,6 @@ class DriveDiskScanApp(ZApplication):
 
     @node_from(from_name='检测网格')
     @node_from(from_name='扫描当前行', status='换行')  # 换行后继续扫描
-    @node_from(from_name='扫描当前行', status='最后一行')  # 最后一行继续扫描
     @operation_node(name='扫描当前行')
     def scan_current_row(self) -> OperationRoundResult:
         """扫描当前行的所有格子（内部循环，不经过状态机）"""
@@ -208,65 +210,44 @@ class DriveDiskScanApp(ZApplication):
             # 等待画面更新后重新截图
             self.screenshot()
 
-        # 行结束，处理换行逻辑
+        # 行结束：下一行存在则点击换行；否则滚轮翻页
+        # 翻页后从(0,0)重扫全页 翻页重叠由缓存按内容去重兜底
         next_row = self.current_row_idx + 1
         next_col = 0
 
-        # 第4行第1个(索引3,0)：需要特殊处理
-        if next_row == 3 and next_col == 0:
-            ctx = self.ctx.cv_service.run_pipeline('驱动盘进度条检测', self.last_screenshot)
-            has_progress_bar = ctx.contours is not None and len(ctx.contours) > 0
+        if next_row < len(self.grid_rows) and len(self.grid_rows[next_row]) > 0:
+            target = self.grid_rows[next_row][0]
+            log.debug(f"[点击] 换行，点击({next_row},{next_col})")
+            self.ctx.controller.click(target)
+            self.current_row_idx = next_row
+            self.current_col_idx = next_col
+            return self.round_success('换行')
 
-            if has_progress_bar:
-                # 有进度条：第4行是最后一行
-                if len(self.grid_rows) > 3 and len(self.grid_rows[3]) > 0:
-                    target = self.grid_rows[3][0]
-                    log.debug("[点击] 检测到进度条，点击(3,0)进入最后一行")
-                    self.ctx.controller.click(target)
-                    self.current_row_idx = 3
-                    self.current_col_idx = 0
-                    return self.round_success('最后一行')
-                else:
-                    log.debug("点击完成，扫描结束")
-                    return self.round_success('扫描完成')
-            else:
-                # 无进度条：滚轮向下翻页(三重安全阀: 签名判重/连续未动/轮数上限)
-                if len(self.grid_rows) > 3 and len(self.grid_rows[3]) > 0:
-                    self.scroll_rounds += 1
-                    if self.scroll_rounds > 80:
-                        log.warning(f"滚动轮数达到上限 {self.scroll_rounds}，强制结束扫描")
-                        return self.round_success('扫描完成')
-                    sig = self._page_signature()
-                    if sig is not None and sig == self._last_page_sig:
-                        self._stuck_rounds += 1
-                    else:
-                        self._stuck_rounds = 0
-                    self._last_page_sig = sig
-                    if self._stuck_rounds >= 2:
-                        log.info(f"连续 {self._stuck_rounds} 轮页面未变化，判定已到列表底部，结束扫描")
-                        return self.round_success('扫描完成')
-                    target = self.grid_rows[3][0]
-                    self.ctx.controller.scroll(3, target)
-                    log.debug(f"[滚动] 第{self.scroll_rounds}轮滚轮翻页")
-                    self.current_row_idx = 2
-                    self.current_col_idx = 0
-                    return self.round_success('滚动', wait=0.6)
-                else:
-                    log.debug("点击完成，扫描结束")
-                    return self.round_success('扫描完成')
+        # 没有更多已检测的行：滚轮向下翻页(安全阀: 签名判重/连续未动/轮数上限)
+        self.scroll_rounds += 1
+        if self.scroll_rounds > 400:
+            log.warning(f"滚动轮数达到上限 {self.scroll_rounds}，强制结束扫描")
+            return self.round_success('扫描完成')
+        sig = self._page_signature()
+        if sig is not None and sig == self._last_page_sig:
+            self._stuck_rounds += 1
+        else:
+            self._stuck_rounds = 0
+        self._last_page_sig = sig
+        if self._stuck_rounds >= 2:
+            log.info(f"连续 {self._stuck_rounds} 轮页面未变化，判定已到列表底部，结束扫描")
+            return self.round_success('扫描完成')
+        scroll_pos = self.grid_rows[-1][0] if self.grid_rows else Point(960, 540)
+        self.ctx.controller.scroll(3, scroll_pos)
+        # 等滚动动画结束再点(0,0) 避免点中旧页物品
+        time.sleep(0.5)
+        first_pos = self.grid_rows[0][0] if self.grid_rows else Point(960, 540)
+        self.ctx.controller.click(first_pos)
+        log.debug(f"[滚动] 第{self.scroll_rounds}轮滚轮翻页")
+        self.current_row_idx = 0
+        self.current_col_idx = 0
+        return self.round_success('滚动', wait=0.6)
 
-        # 普通换行
-        if next_row < len(self.grid_rows):
-            if len(self.grid_rows[next_row]) > 0:
-                target = self.grid_rows[next_row][0]
-                log.debug(f"[点击] 换行，点击({next_row},{next_col})")
-                self.ctx.controller.click(target)
-                self.current_row_idx = next_row
-                self.current_col_idx = next_col
-                return self.round_success('换行')
-
-        log.debug("驱动盘扫描完成")
-        return self.round_success('扫描完成')
 
     def _sort_grids(self, all_disks: list[Point]) -> list[list[Point]]:
         """将所有方格整理为二维网格"""

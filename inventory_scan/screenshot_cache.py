@@ -1,3 +1,4 @@
+import hashlib
 import os
 from typing import Optional
 
@@ -45,6 +46,9 @@ class ScreenshotCache:
             'agent': 'agent'
         }
 
+        # 已入库内容的去重索引 (类型 -> 内容md5 -> 首次保存索引)
+        self._seen_hash: dict[str, dict[str, int]] = {}
+
         if self.save_dir is not None:
             os.makedirs(self.save_dir, exist_ok=True)
 
@@ -79,6 +83,10 @@ class ScreenshotCache:
 
         # 先缓存到内存
         cache[index] = screenshot.copy()
+        # 流程只写不读 只保留最近200张控制内存占用
+        if len(cache) > 200:
+            for old_index in sorted(cache.keys())[:-200]:
+                cache.pop(old_index, None)
 
         # 调试模式下保存到文件
         if self.debug_mode and self.save_dir is not None:
@@ -189,9 +197,30 @@ class ScreenshotCache:
         self._drive_disk_index = 0
         self._wengine_index = 0
         self._agent_index = 0
+        self._seen_hash.clear()
         
         log.info("已清空所有缓存并重置索引")
 
     def __len__(self) -> int:
         """返回所有缓存中的截图总数"""
         return len(self._drive_disk_cache) + len(self._wengine_cache) + len(self._agent_cache)
+
+
+    def save_unique(self, cache_type: str, screenshot: MatLike) -> tuple[int, bool]:
+        """按内容去重保存 相同画面只入库一次
+
+        Returns:
+            (索引, 是否重复) 重复时索引为首次保存的索引
+        """
+        if cache_type not in self._cache_map:
+            raise ValueError(f"不支持的缓存类型: {cache_type}")
+
+        digest = hashlib.md5(screenshot.tobytes()).hexdigest()
+        seen = self._seen_hash.setdefault(cache_type, {})
+        first_index = seen.get(digest)
+        if first_index is not None:
+            return first_index, True
+
+        index = self.save(cache_type, screenshot)
+        seen[digest] = index
+        return index, False

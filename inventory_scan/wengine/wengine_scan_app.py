@@ -34,8 +34,11 @@ class WengineScanApp(DriveDiskScanApp):
             cropped = cv2_utils.crop_image_only(screenshot, storage_area.rect)
 
             # 保存到音擎缓存（调试模式下会同时保存到文件）
-            index = self.screenshot_cache.save('wengine', cropped)
+                        # 按内容去重保存 翻页重叠或误点产生的相同详情只入库一次
+            index, dup = self.screenshot_cache.save_unique('wengine', cropped)
             self.screenshot_index = index + 1
+            if dup:
+                return
 
             # 提交OCR任务（异步处理）
             if self.ocr_worker is not None:
