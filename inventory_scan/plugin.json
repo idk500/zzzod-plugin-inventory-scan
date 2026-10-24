@@ -1,0 +1,23 @@
+{
+  "id": "inventory_scan",
+  "name": "仓库扫描器",
+  "summary": "自动翻页扫描仓库中的代理人/驱动盘/音擎并 OCR 导出清单（输出到 .debug/inventory_exports）。",
+  "version": "1.0.0",
+  "versionCode": 1,
+  "defaultGroup": true,
+  "needNotify": true,
+  "author": {
+    "name": "idk500",
+    "url": "https://github.com/idk500"
+  },
+  "homepage": "https://github.com/idk500/zzzod-plugin-inventory-scan",
+  "risk": [
+    "automation"
+  ],
+  "compatibility": {
+    "minAppVersion": "0.0.0",
+    "minCoreApiVersion": 1,
+    "python": ">=3.11"
+  },
+  "apps": []
+}
