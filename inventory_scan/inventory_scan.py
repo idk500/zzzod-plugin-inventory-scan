@@ -246,8 +246,9 @@ class InventoryScanApp(ZApplication):
 
             log.info(f'已导出完整数据到: {export_path}')
             log.info(f'驱动盘: {len(export_data["discs"])}个, 音擎: {len(export_data["wengines"])}个, 角色: {len(export_data["characters"])}个')
+            log.info('可导入在线优化器（Zenless Optimizer）: https://zzz.233618.xyz/')
 
-            return self.round_success('完整数据已导出')
+            return self.round_success('完整数据已导出，可导入在线优化器')
 
         except Exception as e:
             log.error(f'导出完整数据失败: {e}')
