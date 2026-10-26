@@ -29,6 +29,8 @@ class AgentScanApp(ZApplication):
             ctx=ctx,
             app_id='agent_scan',
             op_name='角色扫描',
+            # 子应用没有独立工厂注册，不能走工厂取运行记录（否则抛「应用未注册」）
+            use_factory_run_record=False,
         )
         self.screenshot_cache = screenshot_cache
         self.ocr_worker = ocr_worker
