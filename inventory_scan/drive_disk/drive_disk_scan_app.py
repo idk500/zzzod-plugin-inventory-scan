@@ -32,6 +32,8 @@ class DriveDiskScanApp(ZApplication):
             app_id=drive_disk_scan_const.APP_ID,
             op_name=drive_disk_scan_const.APP_NAME,
             node_max_retry_times=100000,
+            # 子应用没有独立工厂注册，不能走工厂取运行记录（否则抛「应用未注册」）
+            use_factory_run_record=False,
         )
 
         # 当前位置（行，列）从(0,0)开始，对应界面上的(1,1)
