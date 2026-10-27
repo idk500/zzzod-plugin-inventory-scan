@@ -47,6 +47,8 @@ class InventoryScanApp(ZApplication):
         self.ocr_worker = OcrWorker(ctx)
         # 音擎导航的逃逸只做一次标记
         self._wengine_escaped: bool = False
+        # 扫描前 OCR 到的游戏内驱动盘总数(用于导出审计) None 表示没读到
+        self._disc_game_total: "int | None" = None
 
         self.drive_disk_scanner = DriveDiskScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
         self.wengine_scanner = WengineScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
@@ -89,6 +91,7 @@ class InventoryScanApp(ZApplication):
             log.debug("已跳过驱动盘扫描")
             return self.round_success('驱动盘已跳过')
         log.debug("开始扫描驱动盘...")
+        self._disc_game_total = self._ocr_disc_total()
         result = self.drive_disk_scanner.execute()
         if result.success:
             log.debug("驱动盘扫描完成")
@@ -96,6 +99,29 @@ class InventoryScanApp(ZApplication):
         else:
             log.error(f"驱动盘扫描失败: {result.status}")
             return self.round_fail(f'驱动盘扫描失败: {result.status}')
+
+    def _ocr_disc_total(self) -> "int | None":
+        """OCR 驱动盘仓库页顶部的持有总数 形如 x/y 取 x 读不到返回 None
+
+        用于导出后的数量审计(游戏内总数 vs 导出条数) 识别漏扫。
+        """
+        import re
+
+        from one_dragon.base.geometry.rectangle import Rect
+
+        try:
+            screen = self.screenshot()
+            results = self.ctx.ocr.crop_and_run_ocr(screen, Rect(0, 0, screen.shape[1], 160))
+            texts = list(results.keys())
+            log.info(f'仓库页顶部 OCR: {texts}')
+            for text in texts:
+                m = re.search(r'(\d+)\s*/\s*(\d+)', text)
+                if m:
+                    return int(m.group(1))
+            return None
+        except Exception as e:
+            log.error(f'OCR 驱动盘总数失败: {e}')
+            return None
 
     @node_from(from_name='扫描驱动盘')
     @operation_node(name='导航到音擎界面')
@@ -240,6 +266,21 @@ class InventoryScanApp(ZApplication):
             }
 
             json_str = json.dumps(export_data, indent=2, ensure_ascii=False)
+
+            # 数量审计：游戏内总数 vs 导出条数 差值非零说明存在漏扫或多记
+            if self._disc_game_total is not None:
+                exported = len(export_data['discs'])
+                delta = exported - self._disc_game_total
+                export_data['audit'] = {
+                    'game_total': self._disc_game_total,
+                    'exported': exported,
+                    'delta': delta,
+                }
+                json_str = json.dumps(export_data, indent=2, ensure_ascii=False)
+                if delta != 0:
+                    log.warning(f'数量审计不一致: 游戏内 {self._disc_game_total} 导出 {exported} 差值 {delta}')
+                else:
+                    log.info(f'数量审计一致: 游戏内 {self._disc_game_total} = 导出 {exported}')
 
             with open(export_path, 'w', encoding='utf-8') as f:
                 f.write(json_str)
