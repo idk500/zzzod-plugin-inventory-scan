@@ -84,6 +84,27 @@ class DriveDiskScanApp(ZApplication):
         self.screenshots_dir = base_dir
         log.debug(f"截图文件夹已准备: {self.screenshots_dir}")
 
+    def _stable_screenshot(self, max_rounds: int = 5, interval: float = 0.25) -> MatLike:
+        """等待画面稳定(连续两帧降采样灰度一致)后返回最新截图
+
+        详情面板打开/切换有动画 中途截帧是漏扫与重复噪声的共同根因。
+        超过 max_rounds 仍不稳定则按最后一帧返回(尽力而为 不阻塞流程)。
+        """
+        import cv2
+        import numpy as np
+
+        screen = self.screenshot()
+        prev_gray: Optional[np.ndarray] = None
+        for _ in range(max_rounds):
+            small = cv2.resize(screen, (240, 135))
+            gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+            if prev_gray is not None and float(np.abs(gray.astype(int) - prev_gray.astype(int)).mean()) < 0.5:
+                break
+            prev_gray = gray
+            time.sleep(interval)
+            screen = self.screenshot()
+        return screen
+
     def _save_screenshot(self, row: int, col: int, screenshot: MatLike):
         """保存截图到缓存并提交OCR任务"""
         if self.screenshot_cache is None:
@@ -190,8 +211,9 @@ class DriveDiskScanApp(ZApplication):
 
         # 同行内循环点击，不经过状态机
         while self.current_col_idx < len(current_row):
-            # 保存当前截图
-            current_screenshot = self.last_screenshot.copy()
+            # 等详情面板动画结束(连续两帧一致)再截取
+            # 动画过渡帧会让同一盘像素指纹变化(重复入库) 或与上一盘过渡帧相同(误判重复漏扫)
+            current_screenshot = self._stable_screenshot()
             self._save_screenshot(self.current_row_idx, self.current_col_idx, current_screenshot)
             self.total_scanned += 1
 
@@ -208,9 +230,6 @@ class DriveDiskScanApp(ZApplication):
             log.debug(f"[点击] 同行，点击({self.current_row_idx},{next_col})")
             self.ctx.controller.click(target)
             self.current_col_idx = next_col
-
-            # 等待画面更新后重新截图
-            self.screenshot()
 
         # 行结束：下一行存在则点击换行；否则滚轮翻页
         # 翻页后从(0,0)重扫全页 翻页重叠由缓存按内容去重兜底
