@@ -39,6 +39,7 @@ from inventory_scan.parser.drive_disk_parser import DriveDiskParser
 
 from . import disc_cleanup_const
 from .disc_cleanup_config import DiscCleanupConfig
+from .disc_cleanup_rules import DiscRules
 from .grid_ops import sort_grids, stable_screenshot
 
 
@@ -59,22 +60,19 @@ class DiscCleanupApp(ZApplication):
             group_id=application_const.DEFAULT_GROUP_ID,
         )
 
+        # v2: 判定规则改为内置矩阵(套装分类×死主词条), decisions.json 仅保留 UI 坐标
         decisions_path = os.path.join(
             os_utils.get_path_under_work_dir('.debug'), 'cleanup_decisions.json')
-        if not os.path.exists(decisions_path):
-            raise FileNotFoundError(
-                '无决策文件 cleanup_decisions.json '
-                '(由规则分析脚本 scripts/rule_audit.py 生成)')
-        with open(decisions_path, encoding='utf-8') as f:
-            self.decisions = json.load(f)
-        self.r1_triples = {(t[0], t[1], t[2]) for t in self.decisions.get('r1_triples', [])}
-        self.r2_items = {
-            (it['set'], it['slot'], it['main'], tuple(it['subs']))
-            for it in self.decisions.get('r2_items', [])
-        }
+        self.decisions = {}
+        if os.path.exists(decisions_path):
+            with open(decisions_path, encoding='utf-8') as f:
+                self.decisions = json.load(f)
         ui = self.decisions.get('ui', {})
-        self.trash_button_rect = ui.get('trash_button_rect')
+        # 弃置按钮坐标内置默认(2026-10-28 视觉确认), decisions.json 可覆盖
+        self.trash_button_rect = ui.get('trash_button_rect', [1420, 808, 1475, 858])
         self.confirm_button_rect = ui.get('confirm_button_rect')
+
+        self.rules = DiscRules()
 
         # 运行参数全部来自本应用配置
         self.capacity_free_min: int = self.config.capacity_free_min
@@ -96,6 +94,7 @@ class DiscCleanupApp(ZApplication):
         self.skipped_eq: int = 0      # 已装备跳过
         self.skipped_lv15: int = 0    # 满级跳过
         self.skipped_seen: int = 0    # 本轮重复指纹跳过
+        self.skipped_unknown_set: int = 0  # 未知套装保留(矩阵未覆盖)
         self.parse_fail: int = 0
         self.probe_saved: int = 0
         self._skip_all: bool = False
@@ -217,7 +216,10 @@ class DiscCleanupApp(ZApplication):
     @operation_node(name='遍历处理')
     def visit_cells(self) -> OperationRoundResult:
         """逐格处理当前行（同步 OCR + 指纹匹配 + 探测/标记）"""
-        if self.current_row_idx >= len(self.grid_rows):
+        if self._skip_all:
+            # 余位充足路径：initialize_align 提前结束但默认路由仍会流入本节点
+            return self._finish('余位充足 跳过清理')
+        if not hasattr(self, 'grid_rows') or self.current_row_idx >= len(self.grid_rows):
             return self._finish('遍历完成')
         current_row = self.grid_rows[self.current_row_idx]
         if self.current_col_idx >= len(current_row):
@@ -288,7 +290,6 @@ class DiscCleanupApp(ZApplication):
         if not disc or not disc.get('setKey') or disc['setKey'] == 'Unknown':
             self.parse_fail += 1
             return
-        fp = (disc['setKey'], disc['slotKey'], disc['mainStatKey'])
         sub_fp = tuple(sorted(s['key'] for s in disc['substats']))
         full_fp = (disc['setKey'], disc['slotKey'], disc['mainStatKey'],
                    disc['level'], sub_fp)
@@ -301,10 +302,19 @@ class DiscCleanupApp(ZApplication):
         self._page_new_fps += 1
 
         if disc.get('slotKey') not in '456':
-            return  # R1/R2 只涉及 4/5/6 号位, 1/2/3 号位主词条固定无需处理
+            return  # 矩阵只涉及 4/5/6 号位, 1/2/3 号位主词条固定无需处理
 
-        hit_r1 = fp in self.r1_triples and disc['level'] < 15
-        hit_r2 = (fp + (sub_fp,)) in self.r2_items and disc['level'] < 15
+        dead = self.rules.is_dead_main(
+            disc['setKey'], disc['slotKey'], disc['mainStatKey'])
+        if dead is None:
+            # 未知套装: fail-safe 保留, 提醒补矩阵
+            self.skipped_unknown_set += 1
+            return
+
+        # R1: 主词条死词条 且 未满级
+        hit_r1 = dead and disc['level'] < 15
+        # R2: 主词条有效但副词条潜力耗尽(仅 L12+ 且 4 条全低价值)
+        hit_r2 = (not dead) and self.rules.is_r2_candidate(disc)
 
         if full_fp in self.marked_fps and (hit_r1 or hit_r2):
             self.skipped_marked += 1  # 历史会话已标记过
@@ -314,7 +324,7 @@ class DiscCleanupApp(ZApplication):
             if hit_r1 or hit_r2:
                 self.skipped_eq += 1
             return
-        if fp in self.r1_triples and disc['level'] >= 15:
+        if dead and disc['level'] >= 15:
             self.skipped_lv15 += 1
             return
 
@@ -396,6 +406,7 @@ class DiscCleanupApp(ZApplication):
             'marked_count': len(self.marked),
             'skipped_equipped': self.skipped_eq, 'skipped_lv15': self.skipped_lv15,
             'skipped_seen': self.skipped_seen, 'skipped_marked': self.skipped_marked,
+            'skipped_unknown_set': self.skipped_unknown_set,
             'parse_fail': self.parse_fail, 'probe_saved': self.probe_saved,
             'probe_mode': self.probe_mode,
         }
@@ -405,6 +416,7 @@ class DiscCleanupApp(ZApplication):
             json.dump(summary, f, ensure_ascii=False, indent=1)
         log.info(f'[清理结束] {reason} 访问{self.visited} 标记{len(self.marked)} '
                  f'装备中跳过{self.skipped_eq} 满级跳过{self.skipped_lv15} '
+                 f'未知套装保留{self.skipped_unknown_set} '
                  f'解析失败{self.parse_fail}')
         return self.round_success(reason)
 
