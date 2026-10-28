@@ -64,6 +64,9 @@ class BatteryExchangeApp(ZApplication):
         self.ether_battery_cnt: int = 0
 
         self.exchanged: int = 0
+        # 框架 node_from 默认 ignore_status=True: 无 status 边会无视返回状态兜底流入,
+        # 所以 round_success(自由文本) 不会终止操作, 必须用旗标让后续节点空转
+        self._finished: bool = False
 
         probe_dir = os.path.join(
             os_utils.get_path_under_work_dir('.debug'), 'battery_probe')
@@ -141,18 +144,27 @@ class BatteryExchangeApp(ZApplication):
 
     @operation_node(name='开始前返回', is_start_node=True)
     def back_at_first(self) -> OperationRoundResult:
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         op = BackToNormalWorld(self.ctx)
         return self.round_by_op_result(op.execute())
 
     @node_from(from_name='开始前返回')
     @operation_node(name='打开快捷手册')
     def goto_compendium(self) -> OperationRoundResult:
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         return self.round_by_goto_screen(screen_name='快捷手册-训练')
 
     @node_from(from_name='打开快捷手册')
     @operation_node(name='识别资源')
     def read_resources(self) -> OperationRoundResult:
         """读快捷手册资源栏: 电量 / 储蓄电量 / 以太电池"""
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         pipeline_ctx = self.ctx.cv_service.run_pipeline('电量检测', self.last_screenshot)
         self.battery_charge, self.backup_charge, self.ether_battery_cnt = \
             self._parse_charge_ocr(pipeline_ctx.ocr_result)
@@ -171,6 +183,9 @@ class BatteryExchangeApp(ZApplication):
     @node_from(from_name='识别资源')
     @operation_node(name='点击兑换入口')
     def click_item_entry(self) -> OperationRoundResult:
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         if self.target_item == '以太电池':
             return self.round_by_find_and_click_area(
                 self.last_screenshot, '快捷手册', '以太电池',
@@ -190,6 +205,9 @@ class BatteryExchangeApp(ZApplication):
     @node_from(from_name='点击兑换入口')
     @operation_node(name='点击合成入口')
     def click_synthesize_entry(self) -> OperationRoundResult:
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         return self.round_by_ocr_and_click(
             self.last_screenshot, '[获取]合成',
             success_wait=1, retry_wait=0.5,
@@ -198,6 +216,9 @@ class BatteryExchangeApp(ZApplication):
     @node_from(from_name='点击合成入口')
     @operation_node(name='等待道具处理', timeout_seconds=20)
     def wait_item_process(self) -> OperationRoundResult:
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         current_screen = self.check_and_update_current_screen(
             self.last_screenshot, ['道具处理'])
         if not current_screen:
@@ -209,6 +230,9 @@ class BatteryExchangeApp(ZApplication):
     @operation_node(name='检查合成素材')
     def check_material(self) -> OperationRoundResult:
         """详情标题必须是目标物品(防合错), 素材不足立即收尾"""
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         area = self.ctx.screen_loader.get_area('道具处理', '详情标题')
         target_text = gt(self.target_item, 'game')
         ocr_result = self.round_by_ocr(self.last_screenshot, target_text, area=area)
@@ -225,6 +249,9 @@ class BatteryExchangeApp(ZApplication):
     @node_from(from_name='检查合成素材')
     @operation_node(name='点击合成')
     def click_synthesize(self) -> OperationRoundResult:
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         return self.round_by_find_and_click_area(
             self.last_screenshot, '道具处理', '按钮-合成',
             success_wait=1, retry_wait=0.5,
@@ -233,6 +260,9 @@ class BatteryExchangeApp(ZApplication):
     @node_from(from_name='点击合成')
     @operation_node(name='确认合成')
     def confirm_synthesize(self) -> OperationRoundResult:
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         return self.round_by_find_and_click_area(
             self.last_screenshot, '道具处理-合成确认', '按钮-确认',
             success_wait=1, retry_wait=0.5,
@@ -241,6 +271,9 @@ class BatteryExchangeApp(ZApplication):
     @node_from(from_name='确认合成')
     @operation_node(name='确认获得')
     def confirm_obtained(self) -> OperationRoundResult:
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         result = self.round_by_find_area(self.last_screenshot, '道具处理-获得', '标题-获得')
         if result.is_success:
             return self.round_by_find_and_click_area(
@@ -258,13 +291,23 @@ class BatteryExchangeApp(ZApplication):
     @node_from(from_name='确认获得', success=False)
     @operation_node(name='兑换一轮完成')
     def finish_one_exchange(self) -> OperationRoundResult:
+        r = self._noop_if_finished()
+        if r is not None:
+            return r
         self.exchanged += 1
         log.info(f'已兑换 {self.exchanged}/{self.max_count} 张 {self.target_item}')
         if self.exchanged < self.max_count:
             return self.round_success(self.STATUS_CONTINUE, wait=0.5)
         return self._finish(f'达到单轮上限 {self.max_count}')
 
+    def _noop_if_finished(self) -> OperationRoundResult | None:
+        """已收尾的节点空转通过(沿 ignore_status 边流到链尾自然终止)"""
+        if self._finished:
+            return self.round_success('已收尾跳过')
+        return None
+
     def _finish(self, reason: str) -> OperationRoundResult:
-        """统一收尾: 写汇总后正常结束应用"""
+        """统一收尾: 置旗标 + 写汇总; 后续节点全部空转直到链尾"""
+        self._finished = True
         self._write_summary(reason)
         return self.round_success(reason)

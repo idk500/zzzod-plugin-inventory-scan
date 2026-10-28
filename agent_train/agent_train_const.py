@@ -1,7 +1,8 @@
 # Generated from plugin.json (agent_train/package manifest).
 APP_ID = "agent_train"
 APP_NAME = "代理人自动培养"
-DEFAULT_GROUP = False
+# 默认组: 使其可被一条龙触发; 配置 enabled 默认 false 不会自动跑, 白名单空则直接拒绝
+DEFAULT_GROUP = True
 NEED_NOTIFY = True
 
 PLUGIN_AUTHOR = "idk500"

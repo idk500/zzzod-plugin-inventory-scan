@@ -1,7 +1,8 @@
 # Generated from plugin.json (battery_exchange/package manifest).
 APP_ID = "battery_exchange"
 APP_NAME = "自动兑换电卡"
-DEFAULT_GROUP = False
+# 默认组: 使其可被一条龙触发; 配置 enabled 默认 false 由用户决定是否常驻日常链
+DEFAULT_GROUP = True
 NEED_NOTIFY = True
 
 PLUGIN_AUTHOR = "idk500"

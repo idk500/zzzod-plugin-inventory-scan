@@ -120,8 +120,13 @@ class DiscCleanupApp(ZApplication):
         self.skipped_marked: int = 0
         if os.path.exists(self.state_path):
             try:
+                def _hashable(x):
+                    # JSON 载入后嵌套数组(如副词条列表)不可哈希, 递归转元组
+                    if isinstance(x, list):
+                        return tuple(_hashable(i) for i in x)
+                    return x
                 with open(self.state_path, encoding='utf-8') as f:
-                    self.marked_fps = {tuple(x) for x in json.load(f)}
+                    self.marked_fps = {_hashable(x) for x in json.load(f)}
                 log.info(f'载入历史标记状态 {len(self.marked_fps)} 条')
             except Exception as e:
                 log.error(f'载入标记状态失败: {e}')
