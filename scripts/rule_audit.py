@@ -128,7 +128,31 @@ def _reason(d, rule, conf):
         'desc': (f"{d['setKey']} {d['rarity']}级 L{d['level']} "
                  f"{d['slotKey']}号 主词条[{d['mainStatKey']}] 副[{subs}]"),
         'main': d['mainStatKey'], 'set': d['setKey'], 'slot': d['slotKey'],
+        'subs': sorted(s['key'] for s in d['substats']),
     }
+
+
+def emit_decisions(r1, r2, out_path):
+    """导出指纹决策清单 供 DiscCleanupApp 现场匹配执行（存指纹不存坐标）"""
+    import json
+    import time
+    r1_triples = sorted({(x['set'], x['slot'], x['main']) for x in r1})
+    r2_items = sorted({(x['set'], x['slot'], x['main'], tuple(x['subs'])) for x in r2})
+    payload = {
+        'generated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'source': 'rule_audit.py 规则层预筛（R1主词条错配/R2双暴套装废副词条）',
+        'capacity_free_min': 200,   # 仓库余位低于此值才执行标记（用户 2026-10-28 拍板）
+        'r1_triples': [list(t) for t in r1_triples],
+        'r2_items': [{'set': s, 'slot': sl, 'main': m, 'subs': list(sub)}
+                     for s, sl, m, sub in r2_items],
+        # 现场按钮坐标：probe 阶段确认后回填（null = 只探测不标记）
+        'ui': {'trash_button_rect': None, 'confirm_button_rect': None},
+        'notes': '匹配规则: set+slot+main 命中 R1 且 level<15 未装备即标弃置; '
+                 'R2 额外要求副词条集合一致; 满级/已装备/已锁定现场复核跳过',
+    }
+    with open(out_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    print(f'[decisions] R1三元组 {len(r1_triples)} 组, R2条目 {len(r2_items)} 件 -> {out_path}')
 
 
 # ---------- 报告 ----------
@@ -189,6 +213,8 @@ def main():
         with open(out, 'w', encoding='utf-8') as f:
             f.write(md)
         print(f'\n[saved] {out}')
+    emit_decisions(r1, r2, r'E:\ZZZ-1D\.debug\cleanup_decisions.json')
+    emit_decisions(r1, r2, r'E:\ZODE\.debug\cleanup_decisions.json')
 
 
 if __name__ == '__main__':
