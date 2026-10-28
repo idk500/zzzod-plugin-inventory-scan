@@ -71,6 +71,16 @@ class DiscCleanupApp(ZApplication):
         # 弃置按钮坐标内置默认(2026-10-28 视觉确认), decisions.json 可覆盖
         self.trash_button_rect = ui.get('trash_button_rect', [1420, 808, 1475, 858])
         self.confirm_button_rect = ui.get('confirm_button_rect')
+        # 锁定检测(用户拍板: 锁定盘绝不弃置): 匹配详情面板「开锁」图标,
+        # 匹配不到(锁定/模板缺失/识别失败)一律按锁定处理
+        self.lock_button_rect = ui.get('lock_button_rect', [1508, 806, 1552, 854])
+        self.lock_tpl = None
+        tpl_path = os.path.join(os.path.dirname(__file__), 'assets', 'lock_open.png')
+        if os.path.exists(tpl_path):
+            import cv2
+            self.lock_tpl = cv2.imread(tpl_path, cv2.IMREAD_GRAYSCALE)
+        if self.lock_tpl is None:
+            log.warning('[锁定保护] 未找到 lock_open.png 模板, 本轮所有盘按锁定处理不标记')
 
         self.rules = DiscRules()
 
@@ -95,6 +105,7 @@ class DiscCleanupApp(ZApplication):
         self.skipped_lv15: int = 0    # 满级跳过
         self.skipped_seen: int = 0    # 本轮重复指纹跳过
         self.skipped_unknown_set: int = 0  # 未知套装保留(矩阵未覆盖)
+        self.skipped_locked: int = 0  # 锁定盘跳过(硬保护)
         self.parse_fail: int = 0
         self.probe_saved: int = 0
         self._skip_all: bool = False
@@ -331,11 +342,37 @@ class DiscCleanupApp(ZApplication):
         if not (hit_r1 or hit_r2):
             return
 
+        # 硬保护(用户拍板 2026-10-28): 锁定盘绝不弃置。
+        # fail-safe: 「开锁」图标匹配不到(锁定/模板缺失/识别失败)一律按锁定跳过
+        if not self._is_unlocked():
+            self.skipped_locked += 1
+            log.info(f'[锁定保护] 跳过 {disc["setKey"]} {disc["slotKey"]}号 '
+                     f'{disc["mainStatKey"]} L{disc["level"]}')
+            return
+
         if self.probe_mode:
             self._save_probe(screen, part, disc, hit_r1)
             return
 
         self._mark_disc(screen, disc, hit_r1)
+
+    def _is_unlocked(self) -> bool:
+        """检测当前选中盘是否未锁定: 匹配详情面板锁按钮的「开锁」图标
+
+        离线验证: 12 张未锁定盘实拍该区域全部 1.0 像素级匹配(静态 UI)。
+        任何异常(模板缺失/裁剪失败/匹配低于阈值)都返回 False 即按锁定跳过。
+        """
+        if self.lock_tpl is None:
+            return False
+        import cv2
+        screen = stable_screenshot(lambda: self.screenshot())
+        x1, y1, x2, y2 = self.lock_button_rect
+        part = cv2_utils.crop_image_only(screen, Rect(x1, y1, x2, y2))
+        if part is None or part.size == 0:
+            return False
+        gray = cv2.cvtColor(part, cv2.COLOR_RGB2GRAY) if part.ndim == 3 else part
+        res = cv2.matchTemplate(gray, self.lock_tpl, cv2.TM_CCOEFF_NORMED)
+        return float(res.max()) >= 0.8
 
     def _save_probe(self, screen: MatLike, part: MatLike, disc: dict, hit_r1: bool):
         if self.probe_saved >= 12:
@@ -407,6 +444,7 @@ class DiscCleanupApp(ZApplication):
             'skipped_equipped': self.skipped_eq, 'skipped_lv15': self.skipped_lv15,
             'skipped_seen': self.skipped_seen, 'skipped_marked': self.skipped_marked,
             'skipped_unknown_set': self.skipped_unknown_set,
+            'skipped_locked': self.skipped_locked,
             'parse_fail': self.parse_fail, 'probe_saved': self.probe_saved,
             'probe_mode': self.probe_mode,
         }
@@ -416,6 +454,7 @@ class DiscCleanupApp(ZApplication):
             json.dump(summary, f, ensure_ascii=False, indent=1)
         log.info(f'[清理结束] {reason} 访问{self.visited} 标记{len(self.marked)} '
                  f'装备中跳过{self.skipped_eq} 满级跳过{self.skipped_lv15} '
+                 f'锁定保护跳过{self.skipped_locked} '
                  f'未知套装保留{self.skipped_unknown_set} '
                  f'解析失败{self.parse_fail}')
         return self.round_success(reason)
