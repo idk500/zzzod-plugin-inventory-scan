@@ -106,6 +106,7 @@ class DiscCleanupApp(ZApplication):
         self.skipped_seen: int = 0    # 本轮重复指纹跳过
         self.skipped_unknown_set: int = 0  # 未知套装保留(矩阵未覆盖)
         self.skipped_locked: int = 0  # 锁定盘跳过(硬保护)
+        self.skipped_hint_fail: int = 0  # 弃置状态提示未识别(不盲点开关)
         self.parse_fail: int = 0
         self.probe_saved: int = 0
         self._skip_all: bool = False
@@ -312,7 +313,15 @@ class DiscCleanupApp(ZApplication):
         self.seen_fps.add(full_fp)
         self._page_new_fps += 1
 
+        watch = disc.get('setKey') in ("SwingJazz", "Phaethon'sMelody", 'WhiteWaterBallad')
+        if watch:
+            log.info(f'[盯盘] 解析 {disc["setKey"]} {disc["slotKey"]}号 '
+                     f'{disc["mainStatKey"]} L{disc["level"]} loc={disc.get("location")} '
+                     f'subs={[s["key"] for s in disc["substats"]]}')
+
         if disc.get('slotKey') not in '456':
+            if watch:
+                log.info('[盯盘] -> 槽位不在456, 静默跳过')
             return  # 矩阵只涉及 4/5/6 号位, 1/2/3 号位主词条固定无需处理
 
         dead = self.rules.is_dead_main(
@@ -340,6 +349,9 @@ class DiscCleanupApp(ZApplication):
             return
 
         if not (hit_r1 or hit_r2):
+            if watch:
+                log.info(f'[盯盘] -> 非候选 dead={dead} lv={disc["level"]} '
+                         f'r2={self.rules.is_r2_candidate(disc)}')
             return
 
         # 硬保护(用户拍板 2026-10-28): 锁定盘绝不弃置。
@@ -350,11 +362,44 @@ class DiscCleanupApp(ZApplication):
                      f'{disc["mainStatKey"]} L{disc["level"]}')
             return
 
+        # 弃置开关保护: 底部提示「R 解除弃置」= 已弃置, 再点垃圾桶会取消标记
+        hint = self._read_mark_hint()
+        if hint == 'marked':
+            self.skipped_marked += 1
+            return
+        if hint is None:
+            self.skipped_hint_fail += 1
+            log.info(f'[提示未识别] 跳过 {disc["setKey"]} {disc["slotKey"]}号 '
+                     f'{disc["mainStatKey"]} L{disc["level"]}(不盲点开关)')
+            return
+
         if self.probe_mode:
             self._save_probe(screen, part, disc, hit_r1)
             return
 
         self._mark_disc(screen, disc, hit_r1)
+
+    def _read_mark_hint(self) -> Optional[str]:
+        """读取底部按键提示判断当前盘弃置状态
+
+        「R 弃置」= 未弃置(可点) / 「R 解除弃置」= 已弃置(点了会取消)。
+        返回 'marked' / 'unmarked' / None(识别失败, 调用方应跳过不盲点)。
+        """
+        screen = stable_screenshot(lambda: self.screenshot())
+        part = cv2_utils.crop_image_only(screen, Rect(1600, 1000, 1920, 1060))
+        if part is None or part.size == 0:
+            return None
+        # 注意: 必须传3通道图(2026-10-28 教训: 灰度2维图会让OCR文本检测器
+        # 抛 ValueError -> 节点异常重试 -> 该盘被指纹去重永远漏标)
+        ocr_result = self.ctx.ocr.run_ocr(part)
+        if not ocr_result:
+            return None
+        texts = ''.join(ocr_result.keys())
+        if '解除' in texts:
+            return 'marked'
+        if '弃置' in texts:
+            return 'unmarked'
+        return None
 
     def _is_unlocked(self) -> bool:
         """检测当前选中盘是否未锁定: 匹配详情面板锁按钮的「开锁」图标
@@ -397,6 +442,12 @@ class DiscCleanupApp(ZApplication):
         if len(self.marked) >= self.mark_limit:
             self._finish_reason = f'达到单轮标记上限 {self.mark_limit}'
             return
+        import cv2
+        dbg = os.path.join(os_utils.get_path_under_work_dir('.debug'), 'mark_debug')
+        os.makedirs(dbg, exist_ok=True)
+        idx = len(self.marked) + 1
+        cv2.imwrite(os.path.join(dbg, f'{idx:02d}_before_click.png'),
+                    cv2.cvtColor(screen, cv2.COLOR_RGB2BGR))
         rect = self.trash_button_rect
         center = Point((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)
         self.ctx.controller.click(center)
@@ -408,6 +459,9 @@ class DiscCleanupApp(ZApplication):
             time.sleep(0.8)
         else:
             self._click_ocr_confirm()
+        after = self.screenshot()
+        cv2.imwrite(os.path.join(dbg, f'{idx:02d}_after_confirm.png'),
+                    cv2.cvtColor(after, cv2.COLOR_RGB2BGR))
         self.marked.append({
             'set': disc['setKey'], 'slot': disc['slotKey'],
             'main': disc['mainStatKey'], 'level': disc['level'],
@@ -427,7 +481,8 @@ class DiscCleanupApp(ZApplication):
     def _click_ocr_confirm(self):
         import re
         screen = self.screenshot()
-        results = self.ctx.ocr.crop_and_run_ocr(screen, Rect(660, 420, 600, 380))
+        # (x1,y1,x2,y2) 中央弹窗区; 弃置为直通开关无弹窗, 此路径仅兜底
+        results = self.ctx.ocr.crop_and_run_ocr(screen, Rect(660, 420, 1260, 800))
         for text, mrl in results.items():
             if re.search(r'确\s*认', text):
                 pt = mrl.max.center
@@ -445,6 +500,7 @@ class DiscCleanupApp(ZApplication):
             'skipped_seen': self.skipped_seen, 'skipped_marked': self.skipped_marked,
             'skipped_unknown_set': self.skipped_unknown_set,
             'skipped_locked': self.skipped_locked,
+            'skipped_hint_fail': self.skipped_hint_fail,
             'parse_fail': self.parse_fail, 'probe_saved': self.probe_saved,
             'probe_mode': self.probe_mode,
         }
@@ -455,6 +511,7 @@ class DiscCleanupApp(ZApplication):
         log.info(f'[清理结束] {reason} 访问{self.visited} 标记{len(self.marked)} '
                  f'装备中跳过{self.skipped_eq} 满级跳过{self.skipped_lv15} '
                  f'锁定保护跳过{self.skipped_locked} '
+                 f'提示未识别{self.skipped_hint_fail} '
                  f'未知套装保留{self.skipped_unknown_set} '
                  f'解析失败{self.parse_fail}')
         return self.round_success(reason)
