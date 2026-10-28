@@ -273,6 +273,24 @@ class InventoryScanApp(ZApplication):
                 'characters': self.ocr_worker.scanned_agents
             }
 
+            # 翻页重叠去重: 同指纹(套装+部位+等级+主词条+副词条key与档数)视为重复条目
+            raw_discs = export_data['discs']
+            seen_fps: set = set()
+            deduped: list = []
+            for disc in raw_discs:
+                fp = (disc.get('setKey'), disc.get('slotKey'), disc.get('level'),
+                      disc.get('mainStatKey'),
+                      tuple(sorted((s.get('key'), s.get('upgrades', 1))
+                                   for s in disc.get('substats', []))))
+                if fp in seen_fps:
+                    continue
+                seen_fps.add(fp)
+                deduped.append(disc)
+            if len(deduped) != len(raw_discs):
+                log.warning(f'导出去重: 原始 {len(raw_discs)} 条 → 去重后 {len(deduped)} 条 '
+                            f'(移除翻页重叠重复 {len(raw_discs) - len(deduped)} 条)')
+            export_data['discs'] = deduped
+
             json_str = json.dumps(export_data, indent=2, ensure_ascii=False)
 
             # 数量审计：游戏内总数 vs 导出条数 差值非零说明存在漏扫或多记
