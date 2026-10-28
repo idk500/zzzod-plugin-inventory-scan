@@ -142,22 +142,32 @@ class DiscCleanupApp(ZApplication):
     @node_from(from_name='前往驱动盘仓库')
     @operation_node(name='检查仓库余位')
     def check_capacity(self) -> OperationRoundResult:
-        """OCR 仓库页顶部 持有 x/y，余位充足则不清理（用户门槛 200）"""
+        """OCR 仓库标题「驱动仓库 [ x / y ]」取余位，余位充足则不清理（用户门槛 200）
+
+        注意：页面顶部条同时有右上角邦布等计数器（形如 243/240），
+        必须锚定含「仓库」字样的 OCR 文本，否则会读错对象。
+        """
         import re
         screen = self.screenshot()
-        results = self.ctx.ocr.crop_and_run_ocr(screen, Rect(0, 0, screen.shape[1], 160))
+        results = self.ctx.ocr.crop_and_run_ocr(screen, Rect(0, 0, screen.shape[1], 200))
+        candidates = []  # (is_warehouse, used, cap)
         for text in results.keys():
             m = re.search(r'(\d+)\s*/\s*(\d+)', text)
             if m:
-                used, cap = int(m.group(1)), int(m.group(2))
-                free = cap - used
-                log.info(f'仓库容量: {used}/{cap} 余位 {free} (门槛 {self.capacity_free_min})')
-                if free >= self.capacity_free_min:
-                    self._skip_all = True
-                    return self.round_success(f'余位充足({free}) 跳过清理')
-                return self.round_success(f'余位不足({free}) 继续清理')
-        log.warning('未读到仓库容量 x/y，按需继续（probe 模式下无副作用）')
-        return self.round_success('未读到容量 继续执行')
+                candidates.append(('仓库' in text, int(m.group(1)), int(m.group(2))))
+        if not candidates:
+            log.warning('未读到仓库容量 x/y，按需继续（probe 模式下无副作用）')
+            return self.round_success('未读到容量 继续执行')
+        warehouse = [c for c in candidates if c[0]]
+        _, used, cap = warehouse[0] if warehouse else candidates[0]
+        if not warehouse:
+            log.warning(f'容量候选无「仓库」锚定 可能读错计数器: {candidates}')
+        free = cap - used
+        log.info(f'仓库容量: {used}/{cap} 余位 {free} (门槛 {self.capacity_free_min})')
+        if free >= self.capacity_free_min:
+            self._skip_all = True
+            return self.round_success(f'余位充足({free}) 跳过清理')
+        return self.round_success(f'余位不足({free}) 继续清理')
 
     @node_from(from_name='检查仓库余位')
     @operation_node(name='初始化网格')

@@ -101,9 +101,10 @@ class InventoryScanApp(ZApplication):
             return self.round_fail(f'驱动盘扫描失败: {result.status}')
 
     def _ocr_disc_total(self) -> "int | None":
-        """OCR 驱动盘仓库页顶部的持有总数 形如 x/y 取 x 读不到返回 None
+        """OCR 驱动盘仓库页标题「驱动仓库 [ x / y ]」取 x 读不到返回 None
 
         用于导出后的数量审计(游戏内总数 vs 导出条数) 识别漏扫。
+        注意锚定含「仓库」字样的文本 页面顶部条还有右上角邦布等计数器会干扰。
         """
         import re
 
@@ -111,13 +112,20 @@ class InventoryScanApp(ZApplication):
 
         try:
             screen = self.screenshot()
-            results = self.ctx.ocr.crop_and_run_ocr(screen, Rect(0, 0, screen.shape[1], 160))
+            results = self.ctx.ocr.crop_and_run_ocr(screen, Rect(0, 0, screen.shape[1], 200))
             texts = list(results.keys())
             log.info(f'仓库页顶部 OCR: {texts}')
+            warehouse_hits = []
             for text in texts:
                 m = re.search(r'(\d+)\s*/\s*(\d+)', text)
                 if m:
-                    return int(m.group(1))
+                    warehouse_hits.append(('仓库' in text, int(m.group(1))))
+            anchored = [h for h in warehouse_hits if h[0]]
+            if anchored:
+                return anchored[0][1]
+            if warehouse_hits:
+                log.warning(f'总数候选无「仓库」锚定 取首个: {warehouse_hits}')
+                return warehouse_hits[0][1]
             return None
         except Exception as e:
             log.error(f'OCR 驱动盘总数失败: {e}')
