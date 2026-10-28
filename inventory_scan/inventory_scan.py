@@ -308,5 +308,8 @@ class InventoryScanApp(ZApplication):
         dst_wiki.mkdir(parents=True, exist_ok=True)
         for item in (plugin_assets / "wiki_data").iterdir():
             target = dst_wiki / item.name
-            if not target.exists():
+            if item.is_dir():
+                # icons 等子目录递归复制（copy2 遇目录会 PermissionError）
+                shutil.copytree(item, target, dirs_exist_ok=True)
+            elif not target.exists():
                 shutil.copy2(item, target)
