@@ -1,0 +1,24 @@
+{
+  "id": "agent_train",
+  "name": "代理人自动培养",
+  "summary": "白名单角色按配置目标培养：等级/技能/天赋目标全部配置化。技能默认练到11级封顶、绝不消耗皇冠(仓鼠笼访问器, 11→12必需)；先把当前角色培养到位(消耗共享材料)再切换下一个，避免共用材料影响预算；白名单制永不自动选人。probe 模式默认开启（只读练度出报告）。",
+  "version": "0.1.0",
+  "versionCode": 1,
+  "defaultGroup": false,
+  "needNotify": true,
+  "author": {
+    "name": "idk500",
+    "url": "https://github.com/idk500"
+  },
+  "homepage": "https://github.com/idk500/zzzod-plugin-inventory-scan",
+  "risk": [
+    "automation",
+    "resource_consumption"
+  ],
+  "compatibility": {
+    "minAppVersion": "0.0.0",
+    "minCoreApiVersion": 1,
+    "python": ">=3.11"
+  },
+  "apps": []
+}
