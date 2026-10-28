@@ -89,6 +89,10 @@ class DiscCleanupApp(ZApplication):
         self.visited: int = 0
         self.marked: list[dict] = []
         self.seen_fps: set[tuple] = set()  # 本轮已处理过的完整指纹(翻页重叠去重, 防二次标记被取消)
+        # 翻页安全阀(与扫描器同款): 整页零新增×2 判定到底 + 滚动轮数上限
+        self._page_new_fps: int = 0
+        self._all_dup_pages: int = 0
+        self.scroll_rounds: int = 0
         self.skipped_eq: int = 0      # 已装备跳过
         self.skipped_lv15: int = 0    # 满级跳过
         self.skipped_seen: int = 0    # 本轮重复指纹跳过
@@ -238,6 +242,19 @@ class DiscCleanupApp(ZApplication):
             self.current_col_idx = 0
             return self.round_success('换行')
 
+        # 翻页安全阀(与扫描器同款): 本页零新增说明列表没有前进, 连续2页判到底
+        if self._page_new_fps == 0:
+            self._all_dup_pages += 1
+        else:
+            self._all_dup_pages = 0
+        self._page_new_fps = 0
+        if self._all_dup_pages >= 2:
+            return self._finish('已到列表底部')
+        self.scroll_rounds += 1
+        if self.scroll_rounds > 400:
+            log.warning(f'滚动轮数达到上限 {self.scroll_rounds} 强制结束')
+            return self._finish('滚动轮数上限')
+
         # 翻页：滚轮 + 回到本页第一行第一格（与扫描器一致），页头重叠由 seen_fps 去重
         scroll_pos = self.grid_rows[-1][0] if self.grid_rows else Point(960, 540)
         self.ctx.controller.scroll(3, scroll_pos)
@@ -271,9 +288,6 @@ class DiscCleanupApp(ZApplication):
         if not disc or not disc.get('setKey') or disc['setKey'] == 'Unknown':
             self.parse_fail += 1
             return
-        if disc.get('slotKey') not in '456':
-            return  # R1/R2 只涉及 4/5/6 号位, 1/2/3 号位主词条固定无需处理
-
         fp = (disc['setKey'], disc['slotKey'], disc['mainStatKey'])
         sub_fp = tuple(sorted(s['key'] for s in disc['substats']))
         full_fp = (disc['setKey'], disc['slotKey'], disc['mainStatKey'],
@@ -282,7 +296,12 @@ class DiscCleanupApp(ZApplication):
             # 翻页重叠/同指纹重复: 同指纹盘可互换, 本轮已处理过不再二次点击(防取消标记)
             self.skipped_seen += 1
             return
+        # 去重先于槽位过滤: 任何新盘都计入页新增(供到底判定), 槽位1/2/3同样去重省OCR
         self.seen_fps.add(full_fp)
+        self._page_new_fps += 1
+
+        if disc.get('slotKey') not in '456':
+            return  # R1/R2 只涉及 4/5/6 号位, 1/2/3 号位主词条固定无需处理
 
         hit_r1 = fp in self.r1_triples and disc['level'] < 15
         hit_r2 = (fp + (sub_fp,)) in self.r2_items and disc['level'] < 15
