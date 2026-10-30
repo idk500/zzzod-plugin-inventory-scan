@@ -134,6 +134,14 @@ class DiscCleanupApp(ZApplication):
 
     def _ensure_plugin_assets(self) -> None:
         """插件自带识别管线合并到工作目录 供框架按工作目录路径加载"""
+        try:
+            self._copy_plugin_assets()
+        except Exception as e:
+            # 真·只读安装/杀软锁定等环境问题:不裸崩,记录后继续(管线缺失会导致识别降级,但应用仍可启动)
+            log.error(f'插件资产合并失败(识别功能可能降级),请检查工作目录 assets 写权限: {e}')
+
+    def _copy_plugin_assets(self) -> None:
+        """插件自带识别管线合并到工作目录 供框架按工作目录路径加载"""
         import shutil
         from pathlib import Path
 
