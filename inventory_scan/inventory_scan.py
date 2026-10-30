@@ -66,7 +66,11 @@ class InventoryScanApp(ZApplication):
         """准备截图文件夹并启动OCR工作线程"""
         import shutil
         if os.path.exists(self.screenshots_dir):
-            shutil.rmtree(self.screenshots_dir)
+            try:
+                shutil.rmtree(self.screenshots_dir)
+            except PermissionError as e:
+                # 上轮截图被看图器/杀软/OneDrive 占用时清不掉:降级为复用旧目录,不中断本轮扫描
+                log.warning(f'旧截图目录清理失败,本轮复用现有目录: {e}')
         self.screenshot_cache.reset_all()
         self.ocr_worker.reset()
         self.ocr_worker.start()
@@ -323,6 +327,13 @@ class InventoryScanApp(ZApplication):
 
     def _ensure_plugin_assets(self) -> None:
         """插件自带资产合并到工作目录 识别管线与 wiki 图标库供框架按工作目录路径加载"""
+        try:
+            self._copy_plugin_assets()
+        except Exception as e:
+            # 真·只读安装/杀软锁定等环境问题:不裸崩,记录后继续(管线缺失会导致识别降级,但应用仍可启动)
+            log.error(f'插件资产合并失败(识别功能可能降级),请检查工作目录 assets 写权限: {e}')
+
+    def _copy_plugin_assets(self) -> None:
         plugin_assets = Path(__file__).parent / "assets"
         dst_pipelines = Path(os_utils.get_path_under_work_dir("assets", "image_analysis_pipelines"))
         dst_pipelines.mkdir(parents=True, exist_ok=True)
