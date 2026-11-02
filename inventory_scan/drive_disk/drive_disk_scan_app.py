@@ -3,6 +3,8 @@ import shutil
 import time
 from typing import TYPE_CHECKING, Optional
 
+import cv2
+import numpy as np
 from cv2.typing import MatLike
 
 from one_dragon.base.geometry.point import Point
@@ -14,6 +16,7 @@ from one_dragon.utils import cv2_utils, os_utils
 from one_dragon.utils.log_utils import log
 from ..drive_disk import drive_disk_scan_const
 from ..parser.drive_disk_parser import DriveDiskParser
+from ..repo_total import ocr_repo_total
 from ..screenshot_cache import ScreenshotCache
 from ..zzz_compat import factory_record_kwargs
 from zzz_od.application.zzz_application import ZApplication
@@ -64,6 +67,9 @@ class DriveDiskScanApp(ZApplication):
         self.scroll_rounds: int = 0
         self._all_dup_rounds: int = 0
         self._last_scroll_new_count: int = 0
+
+        # 仓库标题 OCR 读到的已拥有总数（扫描前自检时读取，用于翻页位移校验）
+        self.repo_total: Optional[int] = None
 
     def execute(self) -> OperationResult:
         """执行扫描"""
@@ -129,6 +135,54 @@ class DriveDiskScanApp(ZApplication):
         except Exception as e:
             log.error(f"保存截图失败({row+1},{col+1}): {e}")
 
+    def _save_debug_screenshot(self, name: str) -> Optional[str]:
+        """保存整屏诊断截图，失败不影响流程"""
+        try:
+            debug_dir = os_utils.get_path_under_work_dir('.debug', 'inventory_screenshots')
+            os.makedirs(debug_dir, exist_ok=True)
+            path = os.path.join(debug_dir, f'{name}.png')
+            cv2.imwrite(path, cv2.cvtColor(self.screenshot(), cv2.COLOR_RGB2BGR))
+            log.info(f'诊断截图已保存: {path}')
+            return path
+        except Exception as e:
+            log.error(f'保存诊断截图失败: {e}')
+            return None
+
+    def _grid_region_signature(self) -> Optional[MatLike]:
+        """取当前网格外接矩形的固定尺寸灰度缩略图，用于比较翻页前后画面是否真的移动
+
+        用外接矩形而不是整屏，避免右侧详情面板和顶部计数条的变化干扰判断。
+        """
+        if not self.grid_rows:
+            return None
+        try:
+            xs = [p.x for row in self.grid_rows for p in row]
+            ys = [p.y for row in self.grid_rows for p in row]
+            x1 = max(0, int(min(xs)) - 30)
+            y1 = max(0, int(min(ys)) - 30)
+            x2 = int(max(xs)) + 30
+            y2 = int(max(ys)) + 30
+            region = self.screenshot()[y1:y2, x1:x2]
+            if region.size == 0:
+                return None
+            gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
+            return cv2.resize(gray, (160, 160))
+        except Exception as e:
+            log.error(f'提取网格区域截图失败: {e}')
+            return None
+
+    def _scroll_list_center(self) -> Point:
+        """列表区域中心点，作为滚轮落点
+
+        旧逻辑把滚轮打在最后一行的第一个格子上，格子检测不全时可能落在列表外或滚动条外，
+        滚轮事件被吞掉却当成「已到底」。
+        """
+        if not self.grid_rows:
+            return Point(960, 540)
+        xs = [p.x for row in self.grid_rows for p in row]
+        ys = [p.y for row in self.grid_rows for p in row]
+        return Point((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+
     @operation_node(name='初始化对齐', is_start_node=True)
     def initialize_align(self) -> OperationRoundResult:
         """开始前点击(1,1)确保坐标对齐"""
@@ -161,6 +215,54 @@ class DriveDiskScanApp(ZApplication):
         return self.round_success(f'已对齐到(1,1) 检测到{len(self.grid_rows)}行')
 
     @node_from(from_name='初始化对齐')
+    @operation_node(name='识别自检')
+    def precheck_recognition(self) -> OperationRoundResult:
+        """扫描前识别自检
+
+        方格检测用的是固定 HSV 阈值（要求饱和度/亮度都接近 255），HDR、显卡滤镜、
+        亮度对比度、分辨率或 UI 缩放一变就可能只剩一两个轮廓。旧逻辑对此完全不报错，
+        表现为「只扫一两个就结束」的静默漏扫。这里把「方格数」和仓库标题总数交叉校验，
+        把静默降级变成明确失败；顺手重测一次网格，避免初始化时鼠标压住格子导致的少检。
+        """
+        self.ctx.controller.mouse_move(Point(0, 0))
+        time.sleep(0.2)
+        screen = self.screenshot()
+
+        grid_count = 0
+        cv_ctx = self.ctx.cv_service.run_pipeline('驱动盘方格', screen)
+        if cv_ctx.error_str is None and cv_ctx.contours is not None and len(cv_ctx.contours) > 0:
+            centers = []
+            for x1, y1, x2, y2 in cv_ctx.get_absolute_rects():
+                centers.append(Point(x1 + (x2 - x1) / 2, y1 + (y2 - y1) / 2))
+            rows = self._sort_grids(centers)
+            if rows:
+                self.grid_rows = rows
+                grid_count = sum(len(row) for row in rows)
+
+        self.repo_total = ocr_repo_total(self)
+
+        if grid_count >= drive_disk_scan_const.GRID_PRECHECK_MIN_COUNT:
+            log.info(f'识别自检通过[{self.op_name}]：检测到 {grid_count} 个方格，仓库共有 {self.repo_total} 个')
+            return self.round_success('继续扫描')
+
+        if self.repo_total is not None and self.repo_total > grid_count:
+            self._save_debug_screenshot(f'precheck_fail_{self.app_id}')
+            msg = (
+                f'画面识别异常[{self.op_name}]：仓库内共有 {self.repo_total} 个，但只检测到 {grid_count} 个方格，'
+                f'继续扫描会严重漏扫，已中止。请检查：游戏语言=简体中文、分辨率 1920x1080(16:9)、'
+                f'HDR 关闭、显卡滤镜/色彩增强/护眼模式关闭、Windows 显示缩放 100%。'
+                f'诊断截图：.debug/inventory_screenshots/precheck_fail_{self.app_id}.png'
+            )
+            log.error(msg)
+            return self.round_fail(msg)
+
+        log.warning(
+            f'识别自检[{self.op_name}]：仅检测到 {grid_count} 个方格（仓库总数读取为 {self.repo_total}），'
+            f'无法确认是否为环境问题，按现状继续'
+        )
+        return self.round_success('继续扫描')
+
+    @node_from(from_name='识别自检', status='继续扫描')
     @node_from(from_name='扫描当前行', status='换行')  # 换行后重新检测网格
     @node_from(from_name='扫描当前行', status='滚动')  # 滚动后重新检测网格
     @operation_node(name='检测网格')
@@ -198,7 +300,9 @@ class DriveDiskScanApp(ZApplication):
     def scan_current_row(self) -> OperationRoundResult:
         """扫描当前行的所有格子（内部循环，不经过状态机）"""
         if not self.grid_rows:
-            return self.round_fail('网格未初始化')
+            # 空仓库(或本页确实没有驱动盘)属正常结束，不再当作失败
+            log.info('未检测到任何驱动盘方格，按空仓库处理')
+            return self.round_success('扫描完成')
 
         # 检查是否超出范围
         if self.current_row_idx >= len(self.grid_rows):
@@ -245,7 +349,7 @@ class DriveDiskScanApp(ZApplication):
             self.current_col_idx = next_col
             return self.round_success('换行')
 
-        # 没有更多已检测的行：滚轮向下翻页(安全阀: 签名判重/连续未动/轮数上限)
+        # 没有更多已检测的行：滚轮向下翻页(安全阀: 签名判重/连续未动/位移校验/轮数上限)
         self.scroll_rounds += 1
         if self.scroll_rounds > 400:
             log.warning(f"滚动轮数达到上限 {self.scroll_rounds}，强制结束扫描")
@@ -264,13 +368,48 @@ class DriveDiskScanApp(ZApplication):
         if self._all_dup_rounds >= 2:
             log.info(f"连续 {self._all_dup_rounds} 轮整页无新增，判定已到列表底部，结束扫描")
             return self.round_success('扫描完成')
-        scroll_pos = self.grid_rows[-1][0] if self.grid_rows else Point(960, 540)
-        self.ctx.controller.scroll(3, scroll_pos)
-        # 等滚动动画结束再点(0,0) 避免点中旧页物品
-        time.sleep(0.5)
+
+        # 翻页有效性校验：滚轮没生效时旧逻辑会当成「已到底」静默结束
+        before = self._grid_region_signature()
+        self.ctx.controller.scroll(3, self._scroll_list_center())
+        time.sleep(0.5)  # 等滚动动画结束
+        after = self._grid_region_signature()
+
+        if before is not None and after is not None and before.shape == after.shape:
+            diff = float(np.abs(before.astype(np.int16) - after.astype(np.int16)).mean())
+            if diff < drive_disk_scan_const.SCROLL_MOVE_MIN_DIFF:
+                # 去重后少 1~2 个属正常的重复内容差异，超过就不该再当成「到底」
+                remaining = None if self.repo_total is None else self.repo_total - new_count
+                reached_bottom = (
+                    (remaining is not None and remaining <= 2)
+                    or (remaining is None and new_since == 0)
+                )
+                if reached_bottom:
+                    log.info(
+                        f'滚动后画面未移动(帧差 {diff:.2f})，已识别 {new_count} 个'
+                        f'（仓库总数 {self.repo_total}），判定已到列表底部'
+                    )
+                    return self.round_success('扫描完成')
+
+                self._save_debug_screenshot(f'scroll_no_move_{self.app_id}')
+                detail = (
+                    f'仓库共 {self.repo_total} 个，已识别 {new_count} 个，尚有 {remaining} 个未扫到'
+                    if remaining is not None
+                    else f'本轮已新增 {new_since} 个但画面未移动，无法确认是否到底'
+                )
+                msg = (
+                    f'滚轮翻页无效：{detail}。继续扫描只会重复同一页，已中止。'
+                    f'常见原因是详情面板遮挡列表或滚动位置落在列表之外；'
+                    f'诊断截图 .debug/inventory_screenshots/scroll_no_move_{self.app_id}.png'
+                )
+                log.error(msg)
+                return self.round_fail(msg)
+            log.info(f'[滚动] 第{self.scroll_rounds}轮翻页位移正常，帧差 {diff:.2f}')
+        else:
+            log.warning('[滚动] 缺少有效网格区域，跳过位移校验')
+
         first_pos = self.grid_rows[0][0] if self.grid_rows else Point(960, 540)
         self.ctx.controller.click(first_pos)
-        log.debug(f"[滚动] 第{self.scroll_rounds}轮滚轮翻页")
         self.current_row_idx = 0
         self.current_col_idx = 0
         return self.round_success('滚动', wait=0.6)
