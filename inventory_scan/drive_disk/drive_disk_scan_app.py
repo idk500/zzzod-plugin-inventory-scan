@@ -340,6 +340,15 @@ class DriveDiskScanApp(ZApplication):
                 return True
         return False
 
+    def _park_mouse(self) -> None:
+        """把鼠标移到左上角，去掉格子上的悬停高亮
+
+        截图里带悬停高亮时，同一格两次截图的像素不一致，内容去重（MD5）失效会重复入库，
+        并让「整页无新增」永远不成立——翻到列表底部后一直空转。
+        """
+        self.ctx.controller.mouse_move(Point(0, 0))
+        time.sleep(0.03)
+
     def _ensure_selected(self, target: Point, row: int, col: int) -> bool:
         """点击一个格子并确认它真的被选中
 
@@ -356,11 +365,13 @@ class DriveDiskScanApp(ZApplication):
         prev = self._detail_signature(screen)
         self.ctx.controller.click(target)
         if self._wait_detail_changed(prev):
+            self._park_mouse()
             return True
 
         # 再点一次，轻微右移，兼容点击落在格子边缘没触发的情况
         self.ctx.controller.click(Point(target.x + 8, target.y))
         if self._wait_detail_changed(prev):
+            self._park_mouse()
             return True
 
         self.click_miss += 1
@@ -368,6 +379,7 @@ class DriveDiskScanApp(ZApplication):
             f'({row + 1},{col + 1}) 点击后详情面板未变化：可能是格子边缘点偏，'
             f'也可能与前一个盘完全同款。仍按当前画面取样，由内容去重兜底'
         )
+        self._park_mouse()
         return True
 
     def _scan_done(self, reason: str) -> OperationRoundResult:
@@ -548,31 +560,32 @@ class DriveDiskScanApp(ZApplication):
         if before is not None and after is not None and before.shape == after.shape:
             diff = float(np.abs(before.astype(np.int16) - after.astype(np.int16)).mean())
             if diff < drive_disk_scan_const.SCROLL_MOVE_MIN_DIFF:
-                # 去重后少 1~2 个属正常的重复内容差异，超过就不该再当成「到底」
                 remaining = None if self.repo_total is None else self.repo_total - new_count
-                reached_bottom = (
-                    (remaining is not None and remaining <= 2)
-                    or (remaining is None and new_since == 0)
-                )
-                if reached_bottom:
-                    return self._scan_done(
-                        f'滚动后画面未移动(帧差 {diff:.2f})，已识别 {new_count} 个'
-                        f'（仓库总数 {self.repo_total}）'
-                    )
+                # 滚不动有两种含义，按「翻了几轮 + 已扫到多少」区分：
+                # 刚开局就滚不动且几乎没扫到东西 = 滚轮没生效（真故障）；
+                # 已经翻过几页才滚不动 = 列表到底（正常结束）。
+                scanned_ratio = (new_count / self.repo_total) if self.repo_total else 1.0
+                stalled_early = self.scroll_rounds <= 2 and scanned_ratio < 0.5
 
-                self._save_debug_screenshot(f'scroll_no_move_{self.app_id}')
-                detail = (
-                    f'仓库共 {self.repo_total} 个，已识别 {new_count} 个，尚有 {remaining} 个未扫到'
-                    if remaining is not None
-                    else f'本轮已新增 {new_since} 个但画面未移动，无法确认是否到底'
+                if stalled_early:
+                    self._save_debug_screenshot(f'scroll_no_move_{self.app_id}')
+                    detail = (
+                        f'仓库共 {self.repo_total} 个，已识别 {new_count} 个，尚有 {remaining} 个未扫到'
+                        if remaining is not None
+                        else f'本轮已新增 {new_since} 个但画面未移动，无法确认是否到底'
+                    )
+                    msg = (
+                        f'滚轮翻页无效：{detail}。继续扫描只会重复同一页，已中止。'
+                        f'常见原因是详情面板遮挡列表或滚动位置落在列表之外；'
+                        f'诊断截图 .debug/inventory_screenshots/scroll_no_move_{self.app_id}.png'
+                    )
+                    log.error(msg)
+                    return self.round_fail(msg)
+
+                return self._scan_done(
+                    f'滚动后画面未移动(帧差 {diff:.2f})，已识别 {new_count} 个'
+                    f'（仓库总数 {self.repo_total}），判定已到列表底部'
                 )
-                msg = (
-                    f'滚轮翻页无效：{detail}。继续扫描只会重复同一页，已中止。'
-                    f'常见原因是详情面板遮挡列表或滚动位置落在列表之外；'
-                    f'诊断截图 .debug/inventory_screenshots/scroll_no_move_{self.app_id}.png'
-                )
-                log.error(msg)
-                return self.round_fail(msg)
             log.info(f'[滚动] 第{self.scroll_rounds}轮翻页位移正常，帧差 {diff:.2f}')
         else:
             log.warning('[滚动] 缺少有效网格区域，跳过位移校验')
