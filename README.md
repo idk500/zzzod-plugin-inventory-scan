@@ -204,3 +204,11 @@
 - **[ZCode](https://zcode.z.ai/invite/F9M8N3LD)** —— 智谱 GLM 编程助手，本项目的代码生成与重构主力。
 - **[Kimi](https://kimi-bot.com/activities/zh-cn/invite/share?scenario=subscribe&from=share_poster&invitation_code=VFU7S5)** —— Moonshot AI 助手，长文档阅读与资料调研好帮手。
 
+## 遇到问题？推荐 AI 自助排查 + 社区协作
+
+本项目由 AI 协作开发，同样推荐你用 AI 自主解决问题，把维护精力留给真正的疑难：
+
+1. **AI 自助排查**：把运行日志（`config/<实例>/log/log.txt`）与现象描述投喂给顺手的 AI 助手（WorkBuddy / ZCode / Kimi 均可，见上方友链），大多数环境与配置问题都能直接定位解决。
+2. **提交 Issue**：AI 排查无法解决时再提 issue，请附运行日志、复现步骤，条件允许附录屏；标题带环境信息（基座版本 / 插件版本 / 游戏窗口分辨率）能显著加快定位。
+3. **欢迎本地验证过的 PR**：修复类 PR 请先本地实测通过，描述中附验证环境与运行日志片段；由 AI 协助完成的修复同样欢迎，注明验证结论即可。
+
