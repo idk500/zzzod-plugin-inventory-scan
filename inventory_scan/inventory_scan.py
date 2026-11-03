@@ -351,7 +351,8 @@ class InventoryScanApp(ZApplication):
 
             log.info(f'已导出完整数据到: {export_path}')
             log.info(f'驱动盘: {len(export_data["discs"])}个, 音擎: {len(export_data["wengines"])}个, 角色: {len(export_data["characters"])}个')
-            log.info('可导入在线优化器（Zenless Optimizer）: https://zzz.233618.xyz/')
+            log.info('可导入在线分析器（Zenless Optimizer）: https://zzz.233618.xyz/')
+            log.info('分析器源码与反馈: https://github.com/kawayiYokami/zzz_optimizer')
 
             return self.round_success('完整数据已导出，可导入在线优化器')
 

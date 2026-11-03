@@ -192,11 +192,14 @@
 - 拆解确认弹窗（画面文档里的子态③）尚未建档（`docs/game/screens/驱动盘拆解.md` 标注「待补」）；
   游戏改动该弹窗时，须先补画面档案再改模板，不要凭截图猜坐标。
 
-## 导出数据与配套优化器
+## 导出数据与配套分析器
 
 「导出完整数据」会在输出目录生成 `inventory_<时间戳>.json`（ZOD 格式，dbVersion 2，含驱动盘 / 音擎 / 代理人清单）。导出前自动做全局指纹去重（翻页重叠不产生重复条目）。
 
-该文件可直接导入在线配装优化器 **[Zenless Optimizer](https://zzz.233618.xyz/)**（绝区零优化器）：在「驱动盘」页导入 JSON，即可按角色 / 队伍计算最优驱动盘组合。推荐来自 @Usagi-wusaqi。
+导出的 JSON 可导入在线分析器 / 配装优化器（旧版内置界面的「分析网站」按钮同款）：
+
+- **[Zenless Optimizer（在线分析器）](https://zzz.233618.xyz/)** —— 绝区零优化器：在「驱动盘」页导入 JSON，即可按角色 / 队伍计算最优驱动盘组合。推荐来自 @Usagi-wusaqi。
+- **[kawayiYokami/zzz_optimizer（优化器源码）](https://github.com/kawayiYokami/zzz_optimizer)** —— 分析器的 GitHub 仓库，使用问题可到此处反馈。
 
 ## 推荐工具（友链支持）
 
