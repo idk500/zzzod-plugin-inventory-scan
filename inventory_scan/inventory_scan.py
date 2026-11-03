@@ -17,6 +17,7 @@ from .inventory_scan_config import InventoryScanConfig
 from .ocr_worker import OcrWorker
 from .repo_total import ocr_repo_total
 from .screenshot_cache import ScreenshotCache
+from .warehouse_nav import click_warehouse_tab, goto_drive_warehouse, read_top_title
 from .wengine.wengine_scan_app import WengineScanApp
 from zzz_od.application.zzz_application import ZApplication
 from zzz_od.context.zzz_context import ZContext
@@ -78,15 +79,58 @@ class InventoryScanApp(ZApplication):
         self.drive_disk_scanner.screenshots_dir = self.screenshots_dir
         self.wengine_scanner.screenshots_dir = self.screenshots_dir
         self.agent_scanner.screenshots_dir = self.screenshots_dir
+        self._warn_window_aspect()
         return self.round_success('截图文件夹已准备，OCR工作线程已启动')
 
+    def _warn_window_aspect(self) -> None:
+        """issue#4 预警：非 16:9 窗口下游戏会重排仓库布局，固定 rect 全部漂移。
+
+        鲁棒导航可兜底，但强烈建议标准窗口。检测失败静默跳过（不阻塞扫描）。
+        """
+        try:
+            import ctypes
+            import ctypes.wintypes
+            import win32gui
+
+            hwnd = None
+
+            def _cb(h, _):
+                nonlocal hwnd
+                if win32gui.GetWindowText(h) == '绝区零' and win32gui.IsWindowVisible(h):
+                    hwnd = h
+
+            win32gui.EnumWindows(_cb, None)
+            if hwnd is None:
+                return
+            rc = ctypes.wintypes.RECT()
+            ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rc))
+            w, h = rc.right, rc.bottom
+            if w <= 0 or h <= 0:
+                return
+            ratio = w / h
+            if abs(ratio - 16 / 9) > 0.04:
+                log.warning(
+                    f'游戏窗口 {w}x{h}（宽高比 {ratio:.3f}）偏离 16:9，'
+                    f'游戏会重排仓库页布局导致自动导航不稳定；'
+                    f'建议把游戏窗口分辨率调为 1280x720 或 1920x1080')
+        except Exception:
+            pass
+
     @node_from(from_name='准备截图文件夹')
-    @operation_node(name='导航到驱动盘界面')
+    @operation_node(name='导航到驱动盘界面', node_max_retry_times=5)
     def goto_drive_disk_screen(self) -> OperationRoundResult:
-        """导航到驱动盘界面"""
+        """导航到驱动盘界面
+
+        issue#4：非 16:9 窗口下游戏重排仓库布局，基座固定 pc_rect 错位导致
+        goto_screen 横跳。改用宽区标题 OCR + 页签模板匹配的鲁棒导航，
+        失败时回退基座 goto_screen（16:9 窗口下仍走最快路径）。
+        """
         if not self._scan_drive_disk:
             return self.round_success('跳过驱动盘')
-        return self.round_by_goto_screen(screen_name='仓库-驱动仓库')
+        fail_reason = goto_drive_warehouse(self, self.round_by_goto_screen)
+        if fail_reason is None:
+            return self.round_success('已到达驱动仓库')
+        return self.round_retry(f'导航驱动仓库失败: {fail_reason}', wait=1.5)
 
     @node_from(from_name='导航到驱动盘界面')
     @operation_node(name='扫描驱动盘')
@@ -114,18 +158,30 @@ class InventoryScanApp(ZApplication):
         return ocr_repo_total(self, label='驱动盘')
 
     @node_from(from_name='扫描驱动盘')
-    @operation_node(name='导航到音擎界面')
+    @operation_node(name='导航到音擎界面', node_max_retry_times=5)
     def goto_wengine_screen(self) -> OperationRoundResult:
         """导航到音擎界面
 
-        上游 仓库-驱动仓库 的画面定义没有到 仓库-音擎仓库 的跳转边,
-        页签坐标点击实测也不生效, 所以先返回大世界,
-        再走路由进音擎仓库(应用启动导航验证过这条路)。
+        issue#4：非 16:9 窗口下基座固定 rect 识别/点击失效。
+        优先用宽区标题 OCR 判位：已在音擎仓库直接成功；在驱动仓库则模板匹配点
+        音擎页签（免去返回大世界的长路径）；其它画面才走原逃逸+基座路由。
         """
         self.ocr_worker.pause()
         if not self._scan_wengine:
             self.ocr_worker.resume()
             return self.round_success('跳过音擎')
+
+        title = read_top_title(self)
+        if '音擎仓库' in title:
+            self.ocr_worker.resume()
+            return self.round_success('已在音擎仓库')
+        if '驱动仓库' in title:
+            if click_warehouse_tab(self, 'tab_wengine.png', '音擎仓库', label='音擎'):
+                self.ocr_worker.resume()
+                return self.round_success('已切换到音擎仓库')
+            # 点页签失败 → 走原逃逸路径兜底
+            log.warning('音擎页签模板切换失败，回退返回大世界路由')
+
         # 逃逸只做一次: goto 中间态会重入本节点 每轮逃逸会把上轮打开的菜单关掉形成死循环
         if not self._wengine_escaped:
             op = BackToNormalWorld(self.ctx)
@@ -307,9 +363,60 @@ class InventoryScanApp(ZApplication):
         """插件自带资产合并到工作目录 识别管线与 wiki 图标库供框架按工作目录路径加载"""
         try:
             self._copy_plugin_assets()
+            self._merge_screen_info()
         except Exception as e:
             # 真·只读安装/杀软锁定等环境问题:不裸崩,记录后继续(管线缺失会导致识别降级,但应用仍可启动)
             log.error(f'插件资产合并失败(识别功能可能降级),请检查工作目录 assets 写权限: {e}')
+
+    def _merge_screen_info(self) -> None:
+        """把插件补充的仓库画面区域合并进工作目录 screen_info 并重载。
+
+        官仓基座的 storage_drive_disc.yml 缺少 驱动盘仓库/驱动盘属性/驱动盘进度条
+        三个扫描依赖区域（zode 分支新增，见官仓 issue#4 系列）——缺了会导致
+        方格检测流水线取不到区域直接崩溃。按区域名做增量合并，不动官仓既有定义。
+        """
+        import yaml
+
+        plugin_screen_dir = Path(__file__).parent / "assets" / "screen_info"
+        if not plugin_screen_dir.exists():
+            return
+        dst_screen_dir = Path(os_utils.get_path_under_work_dir("assets", "game_data", "screen_info"))
+        dst_screen_dir.mkdir(parents=True, exist_ok=True)
+
+        changed = False
+        for yml in plugin_screen_dir.glob('*.yml'):
+            target = dst_screen_dir / yml.name
+            with yml.open(encoding='utf-8') as f:
+                plugin_data = yaml.safe_load(f)
+            if not isinstance(plugin_data, dict):
+                continue
+            plugin_areas = {a.get('area_name'): a for a in plugin_data.get('area_list', []) if isinstance(a, dict)}
+
+            if target.exists():
+                with target.open(encoding='utf-8') as f:
+                    base_data = yaml.safe_load(f)
+                if not isinstance(base_data, dict):
+                    base_data = plugin_data
+                base_areas = {a.get('area_name') for a in base_data.get('area_list', []) if isinstance(a, dict)}
+                missing = [v for k, v in plugin_areas.items() if k not in base_areas]
+                if not missing:
+                    continue
+                base_data.setdefault('area_list', []).extend(missing)
+                merged = base_data
+            else:
+                merged = plugin_data
+
+            with target.open('w', encoding='utf-8') as f:
+                yaml.safe_dump(merged, f, allow_unicode=True, sort_keys=False)
+            log.info(f'插件画面定义已合并: {yml.name} (+{len(plugin_areas) if not target.exists() else "增量"})')
+            changed = True
+
+        if changed:
+            try:
+                self.ctx.screen_loader.reload(from_separated_files=True)
+                log.info('screen_loader 已重载（插件画面区域生效）')
+            except Exception as e:
+                log.warning(f'screen_loader 重载失败（重启应用后生效）: {e}')
 
     def _copy_plugin_assets(self) -> None:
         plugin_assets = Path(__file__).parent / "assets"
