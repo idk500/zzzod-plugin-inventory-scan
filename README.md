@@ -197,3 +197,10 @@
 「导出完整数据」会在输出目录生成 `inventory_<时间戳>.json`（ZOD 格式，dbVersion 2，含驱动盘 / 音擎 / 代理人清单）。导出前自动做全局指纹去重（翻页重叠不产生重复条目）。
 
 该文件可直接导入在线配装优化器 **[Zenless Optimizer](https://zzz.233618.xyz/)**（绝区零优化器）：在「驱动盘」页导入 JSON，即可按角色 / 队伍计算最优驱动盘组合。推荐来自 @Usagi-wusaqi。
+
+## 推荐工具（友链支持）
+
+- **[WorkBuddy](https://www.workbuddy.cn/events/invite?inviteCode=bz944mufovr)** —— 腾讯出品的全场景 AI 工作台，本插件的设计、编码、测试与发版流程均在其 AI 助手协助下完成。
+- **[ZCode](https://zcode.z.ai/invite/F9M8N3LD)** —— 智谱 GLM 编程助手，本项目的代码生成与重构主力。
+- **[Kimi](https://kimi-bot.com/activities/zh-cn/invite/share?scenario=subscribe&from=share_poster&invitation_code=VFU7S5)** —— Moonshot AI 助手，长文档阅读与资料调研好帮手。
+
