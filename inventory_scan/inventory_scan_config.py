@@ -38,3 +38,12 @@ class InventoryScanConfig(ApplicationConfig):
     @scan_agent.setter
     def scan_agent(self, new_value: bool) -> None:
         self.update('scan_agent', new_value)
+
+    @property
+    def auto_open_optimizer(self) -> bool:
+        """导出成功后自动打开在线分析器网页（扫盘不在一条龙链内,仅手动跑;若日后加入自动链需关闭此项）"""
+        return self.get('auto_open_optimizer', True)
+
+    @auto_open_optimizer.setter
+    def auto_open_optimizer(self, new_value: bool) -> None:
+        self.update('auto_open_optimizer', new_value)

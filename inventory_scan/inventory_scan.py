@@ -1,5 +1,6 @@
 import os
 import shutil
+import webbrowser
 
 from one_dragon.base.operation.application import application_const
 from one_dragon.base.operation.operation_edge import node_from
@@ -354,11 +355,24 @@ class InventoryScanApp(ZApplication):
             log.info('可导入在线分析器（Zenless Optimizer）: https://zzz.233618.xyz/')
             log.info('分析器源码与反馈: https://github.com/kawayiYokami/zzz_optimizer')
 
+            if self.config.auto_open_optimizer:
+                self._open_optimizer_site()
+            else:
+                log.info('已按配置跳过自动打开分析器')
+
             return self.round_success('完整数据已导出，可导入在线优化器')
 
         except Exception as e:
             log.error(f'导出完整数据失败: {e}')
             return self.round_fail(f'导出失败: {e}')
+
+    def _open_optimizer_site(self) -> None:
+        """导出成功后用默认浏览器打开在线分析器（仅手动扫盘场景,失败不影响应用结果）"""
+        try:
+            opened = webbrowser.open('https://zzz.233618.xyz/')
+            log.info('已自动打开在线分析器' if opened else '自动打开分析器失败（无可用浏览器）')
+        except Exception as e:
+            log.warning(f'自动打开分析器异常(不影响导出): {e}')
 
     def _ensure_plugin_assets(self) -> None:
         """插件自带资产合并到工作目录 识别管线与 wiki 图标库供框架按工作目录路径加载"""
