@@ -41,7 +41,7 @@ class InventoryScanConfig(ApplicationConfig):
 
     @property
     def auto_open_optimizer(self) -> bool:
-        """导出成功后自动打开在线分析器网页（扫盘不在一条龙链内,仅手动跑;若日后加入自动链需关闭此项）"""
+        """导出成功后自动打开输出文件夹并选中导出的 json（用户反馈只弹网站不知道干嘛）。分析器网址始终打在日志里"""
         return self.get('auto_open_optimizer', True)
 
     @auto_open_optimizer.setter

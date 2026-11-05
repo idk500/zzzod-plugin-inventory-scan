@@ -534,6 +534,17 @@ class DriveDiskScanApp(ZApplication):
 
         # 没有更多已检测的行：滚轮向下翻页(安全阀: 签名判重/连续未动/位移校验/轮数上限)
         self.scroll_rounds += 1
+        # 进度提示：大仓库扫描耗时以分钟计，让用户知道没有卡死
+        try:
+            scanned_now = (len(self.ocr_worker.scanned_discs)
+                           if self.ocr_worker is not None else 0)
+            if self.repo_total is not None:
+                log.info(f'[进度] 第 {self.scroll_rounds} 次翻页，已入库 {scanned_now}'
+                         f' / 仓库约 {self.repo_total} 盘（每页36盘约1分钟，请耐心等待）')
+            else:
+                log.info(f'[进度] 第 {self.scroll_rounds} 次翻页，已入库 {scanned_now} 盘')
+        except Exception:
+            pass
         if self.scroll_rounds > 400:
             log.warning(f"滚动轮数达到上限 {self.scroll_rounds}，强制结束扫描")
             return self._scan_done('滚动轮数达到上限')

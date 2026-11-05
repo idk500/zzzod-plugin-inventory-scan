@@ -1,6 +1,7 @@
 import os
 import shutil
-import webbrowser
+import subprocess
+import sys
 
 from one_dragon.base.operation.application import application_const
 from one_dragon.base.operation.operation_edge import node_from
@@ -148,7 +149,42 @@ class InventoryScanApp(ZApplication):
             return self.round_success('驱动盘扫描完成')
         else:
             log.error(f"驱动盘扫描失败: {result.status}")
-            return self.round_fail(f'驱动盘扫描失败: {result.status}')
+            self._export_partial_on_abort()
+            return self.round_fail(
+                f'驱动盘扫描失败: {result.status}'
+                f'（已扫到的部分数据若非空会导出为 partial 文件，见日志）')
+
+    def _export_partial_on_abort(self) -> None:
+        """扫描中断/失败时把已扫到的驱动盘导出为 partial 文件，不白扫
+
+        issue#6：大仓库扫描以分钟计，用户以为卡死手动停止后什么都拿不到。
+        """
+        try:
+            discs = list(self.ocr_worker.scanned_discs or [])
+            if not discs:
+                log.info('中断导出: 尚未扫到任何驱动盘，无部分数据可存')
+                return
+            export_dir = os_utils.get_path_under_work_dir('.debug', 'inventory_exports')
+            os.makedirs(export_dir, exist_ok=True)
+            timestamp = int(time.time())
+            export_path = os.path.join(
+                export_dir, f'inventory_partial_{timestamp}.json')
+            export_data = {
+                'format': 'ZOD',
+                'dbVersion': 2,
+                'source': 'Zenless Optimizer',
+                'version': 1,
+                'discs': discs,
+                'wengines': [],
+                'characters': [],
+                'audit': {'partial': True, 'exported': len(discs)},
+            }
+            with open(export_path, 'w', encoding='utf-8') as f:
+                json.dump(export_data, f, indent=2, ensure_ascii=False)
+            log.info(f'中断导出: 已扫到 {len(discs)} 个驱动盘，已存到 {export_path}'
+                     f'（部分数据，可导入分析器但可能不全）')
+        except Exception as e:
+            log.warning(f'中断导出失败(不影响主流程): {e}')
 
     def _ocr_disc_total(self) -> "int | None":
         """OCR 驱动盘仓库页标题「驱动仓库 [ x / y ]」取 x 读不到返回 None
@@ -352,13 +388,13 @@ class InventoryScanApp(ZApplication):
 
             log.info(f'已导出完整数据到: {export_path}')
             log.info(f'驱动盘: {len(export_data["discs"])}个, 音擎: {len(export_data["wengines"])}个, 角色: {len(export_data["characters"])}个')
-            log.info('可导入在线分析器（Zenless Optimizer）: https://zzz.233618.xyz/')
+            log.info('下一步: 打开在线分析器（Zenless Optimizer）https://zzz.233618.xyz/ → 选择导入 → 选中刚弹出的 json 文件')
             log.info('分析器源码与反馈: https://github.com/kawayiYokami/zzz_optimizer')
 
             if self.config.auto_open_optimizer:
-                self._open_optimizer_site()
+                self._open_export(export_path)
             else:
-                log.info('已按配置跳过自动打开分析器')
+                log.info('已按配置跳过打开输出文件夹')
 
             return self.round_success('完整数据已导出，可导入在线优化器')
 
@@ -366,13 +402,19 @@ class InventoryScanApp(ZApplication):
             log.error(f'导出完整数据失败: {e}')
             return self.round_fail(f'导出失败: {e}')
 
-    def _open_optimizer_site(self) -> None:
-        """导出成功后用默认浏览器打开在线分析器（仅手动扫盘场景,失败不影响应用结果）"""
+    def _open_export(self, export_path: str) -> None:
+        """导出成功后在资源管理器中打开输出文件夹并选中 json（用户反馈只弹网站不知道返回了什么）"""
         try:
-            opened = webbrowser.open('https://zzz.233618.xyz/')
-            log.info('已自动打开在线分析器' if opened else '自动打开分析器失败（无可用浏览器）')
+            if sys.platform == 'win32':
+                subprocess.Popen(['explorer', '/select,', os.path.normpath(export_path)])
+                log.info('已打开输出文件夹并选中导出文件')
+            else:
+                import platform
+                opener = 'open' if platform.system() == 'Darwin' else 'xdg-open'
+                subprocess.Popen([opener, os.path.dirname(export_path)])
+                log.info(f'已打开输出文件夹: {os.path.dirname(export_path)}')
         except Exception as e:
-            log.warning(f'自动打开分析器异常(不影响导出): {e}')
+            log.warning(f'打开输出文件夹失败(不影响导出): {e}，文件在 {export_path}')
 
     def _ensure_plugin_assets(self) -> None:
         """插件自带资产合并到工作目录 识别管线与 wiki 图标库供框架按工作目录路径加载"""
