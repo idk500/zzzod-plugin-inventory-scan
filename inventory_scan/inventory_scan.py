@@ -2,12 +2,13 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 from one_dragon.base.operation.application import application_const
 from one_dragon.base.operation.operation_edge import node_from
 from one_dragon.base.operation.operation_node import operation_node
 from one_dragon.base.operation.operation_round_result import OperationRoundResult
-from one_dragon.utils import os_utils
+from one_dragon.utils import cv2_utils, os_utils
 from one_dragon.utils.log_utils import log
 from pathlib import Path
 from . import inventory_scan_const
@@ -154,14 +155,18 @@ class InventoryScanApp(ZApplication):
                 f'（已扫到的部分数据若非空会导出为 partial 文件，见日志）')
 
     def _export_partial_on_abort(self) -> None:
-        """扫描中断/失败时把已扫到的驱动盘导出为 partial 文件，不白扫
+        """扫描中断/失败时把已扫到的数据导出为 partial 文件，不白扫
 
         issue#6：大仓库扫描以分钟计，用户以为卡死手动停止后什么都拿不到。
+        用户反馈（2026-11-05）：角色环节失败时整个应用直接失败，导出节点根本没跑，
+        连已扫好的驱动盘/音擎都拿不到。所以三类数据一起导出，只要有一类非空就落盘。
         """
         try:
             discs = list(self.ocr_worker.scanned_discs or [])
-            if not discs:
-                log.info('中断导出: 尚未扫到任何驱动盘，无部分数据可存')
+            wengines = list(self.ocr_worker.scanned_wengines or [])
+            characters = list(self.ocr_worker.scanned_agents or [])
+            if not (discs or wengines or characters):
+                log.info('中断导出: 尚未扫到任何数据，无部分数据可存')
                 return
             export_dir = os_utils.get_path_under_work_dir('.debug', 'inventory_exports')
             os.makedirs(export_dir, exist_ok=True)
@@ -174,14 +179,19 @@ class InventoryScanApp(ZApplication):
                 'source': 'Zenless Optimizer',
                 'version': 1,
                 'discs': discs,
-                'wengines': [],
-                'characters': [],
-                'audit': {'partial': True, 'exported': len(discs)},
+                'wengines': wengines,
+                'characters': characters,
+                'audit': {
+                    'partial': True,
+                    'exported': len(discs),
+                    'exported_wengines': len(wengines),
+                    'exported_characters': len(characters),
+                },
             }
             with open(export_path, 'w', encoding='utf-8') as f:
                 json.dump(export_data, f, indent=2, ensure_ascii=False)
-            log.info(f'中断导出: 已扫到 {len(discs)} 个驱动盘，已存到 {export_path}'
-                     f'（部分数据，可导入分析器但可能不全）')
+            log.info(f'中断导出: 驱动盘 {len(discs)} 音擎 {len(wengines)} 角色 {len(characters)}，'
+                     f'已存到 {export_path}（部分数据，可导入分析器但可能不全）')
         except Exception as e:
             log.warning(f'中断导出失败(不影响主流程): {e}')
 
@@ -245,31 +255,67 @@ class InventoryScanApp(ZApplication):
             return self.round_success('音擎扫描完成')
         else:
             log.error(f"音擎扫描失败: {result.status}")
-            return self.round_fail(f'音擎扫描失败: {result.status}')
+            self._export_partial_on_abort()
+            return self.round_fail(f'音擎扫描失败: {result.status}'
+                                   f'（已扫到的部分数据会导出为 partial 文件，见日志）')
 
     @node_from(from_name='扫描音擎')
     @operation_node(name='导航到代理人界面', node_max_retry_times=30)
     def goto_agent_screen(self) -> OperationRoundResult:
-        """导航到代理人界面"""
+        """导航到代理人攻略页。
+
+        游戏路径：大世界 → 菜单 → 底部「代理人」→ 详情页左上角「代理人攻略」。
+
+        两个实机踩过的坑（2026-11-05）：
+        1. 「代理人-信息」这个画面的识别锚点是官仓的「街区」文字，而代理人页上根本没有
+           「街区」，识别永远不成立——之前节点就卡在「点 代理人-信息」死循环 8 轮后人工结束。
+           所以这里**不依赖导航返回值**：每轮先看左上角有没有「代理人攻略」入口，
+           有就直接点，绕开识别问题，也不去改官仓的画面定义。
+        2. 「代理人攻略」在页面左上角，不是右上角的「角色攻略」；右上角那个是攻略页里的
+           页签，只能用来判断「已经在攻略页」。
+        """
         self.ocr_worker.pause()
         if not self._scan_agent:
             self.ocr_worker.resume()
             return self.round_success('跳过角色')
 
-        nav_result = self.round_by_goto_screen(screen_name='代理人-信息')
-        if nav_result.is_fail:
+        screen = self.screenshot()
+        # 已经在攻略页就不要动鼠标——此时左上角那块坐标已经不是入口按钮了
+        if screen is not None and self.agent_scanner.is_guide_page(screen):
             self.ocr_worker.resume()
-        if not nav_result.is_success:
-            return nav_result
+            return self.round_success('已在代理人攻略页')
 
-        # 攻略页方案：游戏会记住上次停留的子页，统一点一次「角色攻略」页签确保位置正确。
-        # 旧流程会去找「按钮-代理人基础」，但那个按钮只存在于角色详情的基础页，
-        # 在攻略页并不存在，正是 characters 恒为 0 的直接原因。
-        area = self.ctx.screen_loader.get_area('代理人-信息', '攻略-页签')
+        # 已经在代理人详情页时不必再走一遍菜单导航
+        if screen is None or not self._has_guide_entry(screen):
+            nav_result = self.round_by_goto_screen(screen=screen, screen_name='代理人-信息')
+            if nav_result.is_fail:
+                self.ocr_worker.resume()
+            if not nav_result.is_success:
+                return nav_result
+
+        area = self.ctx.screen_loader.get_area('代理人-信息', '按钮-代理人攻略')
         self.ctx.controller.click(area.center)
-        time.sleep(0.8)
+        time.sleep(1.0)
+
+        screen = self.screenshot()
+        if screen is not None and self.agent_scanner.is_guide_page(screen):
+            self.ocr_worker.resume()
+            return self.round_success('已进入代理人攻略页')
+
         self.ocr_worker.resume()
-        return self.round_success('已到达代理人界面')
+        return self.round_retry('点击代理人攻略后仍未进入攻略页')
+
+    def _has_guide_entry(self, screen) -> bool:
+        """代理人详情页左上角是否有「代理人攻略」入口按钮。"""
+        try:
+            area = self.ctx.screen_loader.get_area('代理人-信息', '按钮-代理人攻略')
+            img = cv2_utils.crop_image_only(screen, area.rect)
+            ocr_result = self.ctx.ocr.run_ocr(img)
+        except Exception:  # noqa: BLE001
+            return False
+        if not ocr_result:
+            return False
+        return any('代理人攻略' in t for t in ocr_result)
 
     def _is_button_colorful(self, screen, screen_name: str, area_name: str) -> bool:
         """
@@ -310,7 +356,10 @@ class InventoryScanApp(ZApplication):
             return self.round_success('角色扫描完成')
         else:
             log.error(f"角色扫描失败: {result.status}")
-            return self.round_fail(f'角色扫描失败: {result.status}')
+            # 不让角色环节的失败把已经扫好的驱动盘/音擎一起废掉
+            self._export_partial_on_abort()
+            return self.round_fail(f'角色扫描失败: {result.status}'
+                                   f'（已扫到的部分数据会导出为 partial 文件，见日志）')
 
     @node_from(from_name='扫描角色')
     @operation_node(name='等待OCR完成')

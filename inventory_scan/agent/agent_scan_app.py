@@ -51,6 +51,7 @@ UP_MARK_BOX = Rect(180, 85, 660, 190)     # 「独家频段」UP 池标签（在
 FALLBACK_ROW_Y = 146                  # 行检测失败时的兜底首行中心
 NAME_BOX = Rect(720, 180, 1030, 260)  # 右上角 AGENT INFO 角色名区域
 OWNED_BOX = Rect(1378, 268, 1502, 322)  # 已获得时显示「特训方案」，未获得显示 EMPTY
+GUIDE_TAB_BOX = Rect(1204, 18, 1472, 78)  # 攻略页右上「角色攻略」页签；详情页同一位置是角色名（英文字母）
 LEVEL_DY = (46, 88)                   # 等级数字纵向范围（相对首行中心）
 LEVEL_DX = (7, 62)                    # 等级数字横向偏移（相对列左边界）
 SCROLL_POS = Point(416, 700)          # 滚动时鼠标停留位置（网格中央）
@@ -88,62 +89,27 @@ class AgentScanApp(ZApplication):
         """逐行扫描代理人攻略页，读名字与等级。"""
         ctrl = self.ctx.controller
 
-        row_y = self._goto_list_top()
-        if row_y is None:
+        located = self._goto_list_top()
+        if located is None:
             return self.round_fail('无法定位代理人列表')
-        self._row_y = row_y
-        log.info(f'[角色扫描] 列表顶部首行中心 y={row_y}')
+        row_y, up_row_y = located
 
         seen: set[str] = set()
         unknown: list[str] = []
         unowned = 0
+
+        self._row_y = row_y
         empty_rows = 0
         row_count = 0
 
         for row in range(MAX_ROWS):
-            row_new = 0
-            row_owned = 0
-            for col_idx, left in enumerate(COL_LEFT):
-                center = Point(left + COL_WIDTH // 2, self._row_y)
-                ctrl.click(center)
-                time.sleep(self.click_wait)
-
-                ok, screen = ctrl.screenshot()
-                if not ok or screen is None:
-                    log.warning(f'[角色扫描] 第{row}行第{col_idx}列截图失败')
-                    continue
-
-                if not self._is_owned(screen):
-                    unowned += 1
-                    log.debug(f'[角色扫描] 第{row}行第{col_idx}列未获得，跳过')
-                    continue
-                row_owned += 1
-
-                raw_name = self._read_name(screen)
-                if not raw_name:
-                    log.debug(f'[角色扫描] 第{row}行第{col_idx}列未识别到名字')
-                    continue
-
-                key = self.parser.match_agent(raw_name)
-                if key is None:
-                    log.warning(f'[角色扫描] 名字 {raw_name!r} 未能匹配角色表，跳过')
-                    if raw_name not in unknown:
-                        unknown.append(raw_name)
-                    continue
-
-                if key in seen:
-                    continue
-
-                seen.add(key)
-                row_new += 1
-                level = self._read_level(screen, col_idx)
-                self._append_agent(key, level)
-                log.info(f'[角色扫描] 第{row}行第{col_idx}列 -> {raw_name} => {key} (Lv{level})')
-
+            row_new, row_unowned = self._scan_row(self._row_y, seen, unknown, tag=f'第{row}行')
+            unowned += row_unowned
             row_count += 1
+
             if row_new == 0:
                 empty_rows += 1
-                log.debug(f'[角色扫描] 第{row}行无新角色（连续{empty_rows}行，已获得{row_owned}个）')
+                log.debug(f'[角色扫描] 第{row}行无新角色（连续{empty_rows}行）')
                 if empty_rows >= MAX_EMPTY_ROWS:
                     break
             else:
@@ -152,14 +118,70 @@ class AgentScanApp(ZApplication):
             ctrl.scroll(1, SCROLL_POS)
             time.sleep(self.scroll_wait)
 
+        # UP 池首行最后再扫：它在滚动时固定不动，混进主循环会被反复读同一批。
+        # 放最后是为了让「已拥有」区先占位——UP 卡片上那个数字是保底次数不是等级，
+        # 先扫会拿到错误等级。这里只补漏，等级按满级处理。
+        if up_row_y is not None:
+            new_n, un_owned = self._scan_row(up_row_y, seen, unknown, tag='UP 行', level_fallback=60)
+            unowned += un_owned
+            log.info(f'[角色扫描] UP 行补扫完成：新增 {new_n} 个，未获得 {un_owned} 个')
+
         log.info(f'[角色扫描] 完成：已获得 {len(seen)} 个角色，扫描 {row_count} 行，'
                  f'跳过未获得 {unowned} 个；未匹配名字 {unknown if unknown else "无"}')
         return self.round_success('扫描完成')
 
+    def _scan_row(self, row_y: int, seen: set[str], unknown: list[str], tag: str,
+                  level_fallback: Optional[int] = None) -> tuple[int, int]:
+        """点选一行的三列，返回 (新增角色数, 未获得数)。
+
+        level_fallback 非空时不再 OCR 等级，直接用该值（UP 卡片的数字不是等级）。
+        """
+        ctrl = self.ctx.controller
+        new_count = 0
+        un_owned = 0
+
+        for col_idx, left in enumerate(COL_LEFT):
+            center = Point(left + COL_WIDTH // 2, row_y)
+            ctrl.click(center)
+            time.sleep(self.click_wait)
+
+            ok, screen = ctrl.screenshot()
+            if not ok or screen is None:
+                log.warning(f'[角色扫描] {tag}第{col_idx}列截图失败')
+                continue
+
+            if not self._is_owned(screen):
+                un_owned += 1
+                log.debug(f'[角色扫描] {tag}第{col_idx}列未获得，跳过')
+                continue
+
+            raw_name = self._read_name(screen)
+            if not raw_name:
+                log.debug(f'[角色扫描] {tag}第{col_idx}列未识别到名字')
+                continue
+
+            key = self.parser.match_agent(raw_name)
+            if key is None:
+                log.warning(f'[角色扫描] 名字 {raw_name!r} 未能匹配角色表，跳过')
+                if raw_name not in unknown:
+                    unknown.append(raw_name)
+                continue
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            new_count += 1
+            level = level_fallback if level_fallback is not None else self._read_level(screen, col_idx, row_y)
+            self._append_agent(key, level)
+            log.info(f'[角色扫描] {tag}第{col_idx}列 -> {raw_name} => {key} (Lv{level})')
+
+        return new_count, un_owned
+
     # ==================== 滚动与定位 ====================
 
-    def _goto_list_top(self) -> Optional[int]:
-        """滚到列表顶部并返回「已拥有」区首行中心 y；失败返回 None。
+    def _goto_list_top(self) -> Optional[tuple[int, Optional[int]]]:
+        """滚到列表顶部，返回 (已拥有区首行中心 y, UP 行中心 y 或 None)。
 
         scroll 的正负方向实测与文档说明相反（负数才是向上），且不同基座实现
         可能不一致，所以两个方向都试，用「顶部才有的独家频段/已拥有标签」判定。
@@ -175,14 +197,32 @@ class AgentScanApp(ZApplication):
             centers = self._detect_row_centers(screen)
             if not centers:
                 continue
-            # 顶部有「独家频段」时第一行是 UP 池且滚动时固定不动，必须跳过，
-            # 否则每轮都会重复读 UP 角色而漏掉「已拥有」区。
-            skip = self._has_up_block(screen) and len(centers) > 1
-            row_y = centers[1] if skip else centers[0]
+
+            # 顶部有「独家频段」时第一行是 UP 池；它在滚动中位置固定，需要单独扫一次
+            has_up = self._has_up_block(screen) and len(centers) > 1
+            up_row_y = centers[0] if has_up else None
+            owned_row_y = centers[1] if has_up else centers[0]
             log.info(f'[角色扫描] 已到列表顶部（方向 {"向上" if direction < 0 else "向下"}），'
-                     f'检测到 {len(centers)} 行，{"跳过 UP 行，" if skip else ""}首行中心 y={row_y}')
-            return row_y
+                     f'检测到 {len(centers)} 行；UP 行 y={up_row_y}，已拥有首行 y={owned_row_y}')
+            return owned_row_y, up_row_y
         return None
+
+    def is_guide_page(self, screen: MatLike) -> bool:
+        """当前是否停在代理人攻略页。
+
+        判据用右上角的「角色攻略」页签：详情页同一位置是角色名的英文大字
+        （如 CHARACTER），攻略页则是中文页签，两者不会混淆。
+        """
+        if screen is None:
+            return False
+        img = cv2_utils.crop_image_only(screen, GUIDE_TAB_BOX)
+        try:
+            ocr_result = self.ctx.ocr.run_ocr(img)
+        except Exception:  # noqa: BLE001
+            return False
+        if not ocr_result:
+            return False
+        return any('角色攻略' in t for t in ocr_result)
 
     def _has_top_marker(self, screen: MatLike) -> bool:
         """列表顶部才会出现「独家频段 / 已拥有」区块。"""
@@ -291,11 +331,11 @@ class AgentScanApp(ZApplication):
             return None
         return max(candidates, key=len).strip()
 
-    def _read_level(self, screen: MatLike, col_idx: int) -> int:
+    def _read_level(self, screen: MatLike, col_idx: int, row_y: int) -> int:
         """读卡片左下角的等级数字；读不到按满级 60 处理。"""
         left = COL_LEFT[col_idx]
-        rect = Rect(left + LEVEL_DX[0], self._row_y + LEVEL_DY[0],
-                    left + LEVEL_DX[1], self._row_y + LEVEL_DY[1])
+        rect = Rect(left + LEVEL_DX[0], row_y + LEVEL_DY[0],
+                    left + LEVEL_DX[1], row_y + LEVEL_DY[1])
         img = cv2_utils.crop_image_only(screen, rect)
         try:
             ocr_result = self.ctx.ocr.run_ocr(img)
