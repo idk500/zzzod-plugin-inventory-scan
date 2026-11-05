@@ -80,7 +80,6 @@ class InventoryScanApp(ZApplication):
         self.ocr_worker.start()
         self.drive_disk_scanner.screenshots_dir = self.screenshots_dir
         self.wengine_scanner.screenshots_dir = self.screenshots_dir
-        self.agent_scanner.screenshots_dir = self.screenshots_dir
         self._warn_window_aspect()
         return self.round_success('截图文件夹已准备，OCR工作线程已启动')
 
@@ -263,13 +262,14 @@ class InventoryScanApp(ZApplication):
         if not nav_result.is_success:
             return nav_result
 
-        screen = self.screenshot()
-        if self._is_button_colorful(screen, '代理人-信息', '按钮-代理人基础'):
-            self.ocr_worker.resume()
-            return self.round_success('已到达代理人界面')
-
-        # 游戏会记住上次停留的子页 不在基础页就直接点基础页签
-        return self.round_by_find_and_click_area(screen, '代理人-信息', '按钮-代理人基础', success_wait=1)
+        # 攻略页方案：游戏会记住上次停留的子页，统一点一次「角色攻略」页签确保位置正确。
+        # 旧流程会去找「按钮-代理人基础」，但那个按钮只存在于角色详情的基础页，
+        # 在攻略页并不存在，正是 characters 恒为 0 的直接原因。
+        area = self.ctx.screen_loader.get_area('代理人-信息', '攻略-页签')
+        self.ctx.controller.click(area.center)
+        time.sleep(0.8)
+        self.ocr_worker.resume()
+        return self.round_success('已到达代理人界面')
 
     def _is_button_colorful(self, screen, screen_name: str, area_name: str) -> bool:
         """

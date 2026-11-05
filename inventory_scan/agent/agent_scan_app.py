@@ -1,4 +1,24 @@
-import json
+"""代理人扫描（攻略页方案）。
+
+背景（2026-11-05 用户提出并实机验证）：
+旧流程在「基础 / 技能 / 核心」三个页签各截一次图再拼接，每个角色 4 次点击、
+4 次截图，而且依赖页签切换后的状态检测。实机上「按钮-代理人基础」在攻略页
+并不存在，流程空转，导致导出里的 characters 长期恒为 0。
+
+新流程利用代理人攻略页（菜单 → 代理人 → 左上角「代理人攻略」）：
+- 左侧是 3 列网格，滚轮滚一格正好推进一行（实机确认是整行吸附，槽位固定）
+- 点选格子后，右上角 AGENT INFO 显示角色名
+- 所以**不需要任何角色头像模板**，OCR 名字 + 翻译表模糊匹配即可确定角色
+
+已拥有 / 未获得的区分（用户 2026-11-05 指出）：
+网格里灰色头像表示未获得，此时右侧原本的「特训方案」按钮位置会变成 EMPTY。
+因此每格右键详情里检查该处是否出现「特训方案」，只有已获得才入库。
+
+代价：技能等级 / 影画 / 核心技等级在这一页看不到，统一给默认值。
+换来的是每角色只需 1 次点击 + 2 次小图 OCR，扫描稳定性和速度都大幅提升。
+
+实机测量基准：1920x1080 客户区（框架标准分辨率）。
+"""
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -6,24 +26,45 @@ import cv2
 import numpy as np
 from cv2.typing import MatLike
 
-from one_dragon.base.operation.operation_edge import node_from
+from one_dragon.base.geometry.point import Point
+from one_dragon.base.geometry.rectangle import Rect
 from one_dragon.base.operation.operation_node import operation_node
 from one_dragon.base.operation.operation_round_result import OperationRoundResult
-from one_dragon.utils import cv2_utils, os_utils
+from one_dragon.utils import cv2_utils
 from one_dragon.utils.log_utils import log
 from ..parser.agent_parser import AgentParser
-from ..screenshot_cache import ScreenshotCache
 from ..zzz_compat import factory_record_kwargs
 from zzz_od.application.zzz_application import ZApplication
 from zzz_od.context.zzz_context import ZContext
 
 if TYPE_CHECKING:
     from ..ocr_worker import OcrWorker
+    from ..screenshot_cache import ScreenshotCache
+
+
+# ---- 代理人攻略页网格参数（1920x1080 实机测量）----
+COL_LEFT = (181, 338, 493)            # 三列卡片的左边界
+COL_WIDTH = 155                       # 单列宽度
+GRID_BOX = Rect(180, 40, 660, 1080)   # 左侧网格整体（行投影 + 稳定性比对）
+TOP_MARK_BOX = Rect(180, 85, 660, 400)    # 列表顶部才有的「独家频段 / 已拥有」标签区
+UP_MARK_BOX = Rect(180, 85, 660, 190)     # 「独家频段」UP 池标签（在已拥有标签上方）
+FALLBACK_ROW_Y = 146                  # 行检测失败时的兜底首行中心
+NAME_BOX = Rect(720, 180, 1030, 260)  # 右上角 AGENT INFO 角色名区域
+OWNED_BOX = Rect(1378, 268, 1502, 322)  # 已获得时显示「特训方案」，未获得显示 EMPTY
+LEVEL_DY = (46, 88)                   # 等级数字纵向范围（相对首行中心）
+LEVEL_DX = (7, 62)                    # 等级数字横向偏移（相对列左边界）
+SCROLL_POS = Point(416, 700)          # 滚动时鼠标停留位置（网格中央）
+
+SCROLL_STEP = 8                       # 每次滚动格数
+SCROLL_MAX_ROUNDS = 12                # 滚到边界最多几轮
+SCROLL_SETTLE = 0.45                  # 每轮滚动后等待
+MAX_ROWS = 80                         # 行数保险上限
+MAX_EMPTY_ROWS = 3                    # 连续多少行没有新角色就认为已到未获得区
 
 
 class AgentScanApp(ZApplication):
 
-    def __init__(self, ctx: ZContext, screenshot_cache: Optional[ScreenshotCache] = None,
+    def __init__(self, ctx: ZContext, screenshot_cache: Optional["ScreenshotCache"] = None,
                  ocr_worker: Optional["OcrWorker"] = None):
         ZApplication.__init__(
             self,
@@ -35,346 +76,268 @@ class AgentScanApp(ZApplication):
         )
         self.screenshot_cache = screenshot_cache
         self.ocr_worker = ocr_worker
-        self.screenshots_dir: Optional[str] = None
-        self.screenshot_index: int = 0
         self.parser = AgentParser()
 
-        self._img_portrait: Optional[MatLike] = None
-        self._img_name: Optional[MatLike] = None
-        self._img_level: Optional[MatLike] = None
-        self._img_skill: Optional[MatLike] = None
-        self._img_core: Optional[MatLike] = None
+        self.click_wait: float = 0.45    # 点击后等详情刷新
+        self.scroll_wait: float = 0.5    # 滚动后等网格吸附
+        self._counter: int = 0
+        self._row_y: int = FALLBACK_ROW_Y
 
-        self._last_click_time: float = 0
+    @operation_node(name='扫描代理人', is_start_node=True)
+    def scan_agents(self) -> OperationRoundResult:
+        """逐行扫描代理人攻略页，读名字与等级。"""
+        ctrl = self.ctx.controller
 
-        user_translation_path = os_utils.get_path_under_work_dir('assets', 'wiki_data', 'zzz_translation.json')
-        try:
-            with open(user_translation_path, 'r', encoding='utf-8') as f:
-                translation_data = json.load(f)
-                self.max_agents = min(len(translation_data.get('character', {})), 100)
-        except Exception as e:
-            log.error(f"读取角色总数失败: {e}，使用默认值100")
-            self.max_agents = 100
+        row_y = self._goto_list_top()
+        if row_y is None:
+            return self.round_fail('无法定位代理人列表')
+        self._row_y = row_y
+        log.info(f'[角色扫描] 列表顶部首行中心 y={row_y}')
 
-    @node_from(from_name='下一位代理人')
-    @operation_node(name='进入基础页面', is_start_node=True, node_max_retry_times=30)
-    def enter_basic_page(self) -> OperationRoundResult:
-        """
-        点击基础按钮并等待页面加载完成
-        同时检测是否到达列表末尾（没有角色）
-        """
-        # 点击基础按钮
-        btn = self.ctx.screen_loader.get_area('代理人-信息', '按钮-代理人基础')
-        self.ctx.controller.click(btn.center)
+        seen: set[str] = set()
+        unknown: list[str] = []
+        unowned = 0
+        empty_rows = 0
+        row_count = 0
 
-        # 等待后截图检测
-        time.sleep(0.3)
-        _, screen = self.ctx.controller.screenshot()
+        for row in range(MAX_ROWS):
+            row_new = 0
+            row_owned = 0
+            for col_idx, left in enumerate(COL_LEFT):
+                center = Point(left + COL_WIDTH // 2, self._row_y)
+                ctrl.click(center)
+                time.sleep(self.click_wait)
 
-        if self.screenshot_index >= self.max_agents:
-            log.debug(f"已扫描{self.screenshot_index}个角色，达到最大数量{self.max_agents}")
-            return self.round_success('扫描完成')
+                ok, screen = ctrl.screenshot()
+                if not ok or screen is None:
+                    log.warning(f'[角色扫描] 第{row}行第{col_idx}列截图失败')
+                    continue
 
-        if self._is_end_of_list(screen):
-            log.debug(f"已到达列表末尾，扫描完成。共扫描{self.screenshot_index}个角色")
-            return self.round_success('扫描完成')
+                if not self._is_owned(screen):
+                    unowned += 1
+                    log.debug(f'[角色扫描] 第{row}行第{col_idx}列未获得，跳过')
+                    continue
+                row_owned += 1
 
-        if self._is_button_colorful(screen, '代理人-信息', '按钮-代理人基础'):
-            return self.round_success('继续扫描')
+                raw_name = self._read_name(screen)
+                if not raw_name:
+                    log.debug(f'[角色扫描] 第{row}行第{col_idx}列未识别到名字')
+                    continue
 
-        return self.round_retry(wait=0.1)
+                key = self.parser.match_agent(raw_name)
+                if key is None:
+                    log.warning(f'[角色扫描] 名字 {raw_name!r} 未能匹配角色表，跳过')
+                    if raw_name not in unknown:
+                        unknown.append(raw_name)
+                    continue
 
-    @node_from(from_name='进入基础页面', status='继续扫描')
-    @operation_node(name='截图基础信息')
-    def capture_basic_info(self) -> OperationRoundResult:
-        """
-        裁剪影画、名称、等级区域
-        """
-        self._reset_temp_images()
+                if key in seen:
+                    continue
 
-        _, screen = self.ctx.controller.screenshot()
+                seen.add(key)
+                row_new += 1
+                level = self._read_level(screen, col_idx)
+                self._append_agent(key, level)
+                log.info(f'[角色扫描] 第{row}行第{col_idx}列 -> {raw_name} => {key} (Lv{level})')
 
-        area_portrait = self.ctx.screen_loader.get_area('代理人-信息', '代理人-影画')
-        area_name = self.ctx.screen_loader.get_area('代理人-信息', '代理人-名称')
-        area_level = self.ctx.screen_loader.get_area('代理人-信息', '代理人-等级')
-
-        self._img_portrait = cv2_utils.crop_image_only(screen, area_portrait.rect)
-        self._img_name = cv2_utils.crop_image_only(screen, area_name.rect)
-        self._img_level = cv2_utils.crop_image_only(screen, area_level.rect)
-
-        return self.round_success()
-
-    @node_from(from_name='截图基础信息')
-    @operation_node(name='进入技能页面', node_max_retry_times=30)
-    def enter_skill_page(self) -> OperationRoundResult:
-        """
-        点击技能按钮并等待页面加载完成
-        """
-        # 点击技能按钮
-        btn = self.ctx.screen_loader.get_area('代理人-信息', '按钮-代理人技能')
-        self.ctx.controller.click(btn.center)
-
-        # 等待后截图检测
-        time.sleep(0.1)
-        _, screen = self.ctx.controller.screenshot()
-
-        # 检测按钮是否变为彩色（加载完成）
-        if self._is_button_colorful(screen, '代理人-信息', '按钮-代理人技能'):
-            return self.round_success()
-
-        return self.round_retry(wait=0.1)
-
-    @node_from(from_name='进入技能页面')
-    @operation_node(name='截图技能信息')
-    def capture_skill_info(self) -> OperationRoundResult:
-        """
-        裁剪技能等级区域
-        """
-        _, screen = self.ctx.controller.screenshot()
-
-        area_skill = self.ctx.screen_loader.get_area('代理人-信息', '代理人-技能等级')
-        self._img_skill = cv2_utils.crop_image_only(screen, area_skill.rect)
-
-        return self.round_success()
-
-    @node_from(from_name='截图技能信息')
-    @operation_node(name='进入核心页面', node_max_retry_times=30)
-    def enter_core_page(self) -> OperationRoundResult:
-        """
-        点击核心技等级按钮并等待页面加载完成
-        """
-        # 点击核心按钮
-        btn = self.ctx.screen_loader.get_area('代理人-信息', '按钮-核心技等级')
-        self.ctx.controller.click(btn.center)
-
-        # 等待后截图检测
-        time.sleep(0.1)
-        _, screen = self.ctx.controller.screenshot()
-
-        # 检测街区按钮是否全黑（核心页面加载完成）
-        if self._is_area_black(screen, '代理人-信息', '按钮-街区'):
-            return self.round_success()
-
-        return self.round_retry(wait=0.1)
-
-    @node_from(from_name='进入核心页面')
-    @operation_node(name='截图核心信息')
-    def capture_core_info(self) -> OperationRoundResult:
-        """
-        裁剪核心等级区域
-        """
-        _, screen = self.ctx.controller.screenshot()
-
-        area_core = self.ctx.screen_loader.get_area('代理人-信息', '代理人-核心等级')
-        self._img_core = cv2_utils.crop_image_only(screen, area_core.rect)
-
-        return self.round_success()
-
-    @node_from(from_name='截图核心信息')
-    @operation_node(name='返回并保存', node_max_retry_times=50)
-    def return_and_save(self) -> OperationRoundResult:
-        """
-        点击返回按钮，等待返回成功后拼接并保存截图
-        点击限流：最多1秒点击一次，检测实时进行
-        """
-        current_time = time.time()
-
-        # 距离上次点击超过1秒才点击
-        if current_time - self._last_click_time >= 1:
-            btn_back = self.ctx.screen_loader.get_area('代理人-信息', '按钮-返回')
-            self.ctx.controller.click(btn_back.center)
-            self._last_click_time = current_time
-
-        # 等待后截图检测
-        time.sleep(0.1)
-        _, screen = self.ctx.controller.screenshot()
-
-        # 检测街区按钮是否不全黑（返回成功）
-        if not self._is_area_black(screen, '代理人-信息', '按钮-街区'):
-            self._last_click_time = 0  # 成功后清空
-            # 拼接并保存截图
-            self._combine_and_save()
-            return self.round_success()
-
-        return self.round_retry(wait=0.1)
-
-    @node_from(from_name='返回并保存')
-    @operation_node(name='下一位代理人')
-    def next_agent(self) -> OperationRoundResult:
-        """
-        点击下一位代理人按钮
-        """
-        btn_next = self.ctx.screen_loader.get_area('代理人-信息', '按钮-下一位代理人')
-        self.ctx.controller.click(btn_next.center)
-
-        return self.round_success(wait=0.3)
-
-    # ==================== 辅助方法 ====================
-
-    def _reset_temp_images(self):
-        """重置临时截图变量"""
-        self._img_portrait = None
-        self._img_name = None
-        self._img_level = None
-        self._img_skill = None
-        self._img_core = None
-
-    def _is_button_colorful(self, screen: MatLike, screen_name: str, area_name: str) -> bool:
-        """
-        检测按钮区域是否出现彩色（中间40%区域）
-        用于判断基础/技能页面是否加载完成
-
-        Args:
-            screen: 当前截图
-            screen_name: 画面名称
-            area_name: 区域名称
-
-        Returns:
-            True 如果区域出现彩色（S通道均值>20），False 否则
-        """
-        try:
-            area = self.ctx.screen_loader.get_area(screen_name, area_name)
-
-            # 获取区域图像
-            x1, y1 = int(area.rect.x1), int(area.rect.y1)
-            x2, y2 = int(area.rect.x2), int(area.rect.y2)
-            region = screen[y1:y2, x1:x2]
-
-            # 左右各裁剪30%，只检测中间40%
-            width = region.shape[1]
-            crop_left = int(width * 0.3)
-            crop_right = int(width * 0.7)
-            region = region[:, crop_left:crop_right]
-
-            # 转换为HSV
-            region_hsv = cv2.cvtColor(region, cv2.COLOR_RGB2HSV)
-
-            # 计算S通道（饱和度）的平均值
-            avg_s = float(region_hsv[:, :, 1].mean())
-
-            # 检测平均S通道是否大于20（有彩色）
-            is_colorful = avg_s > 20
-
-            log.debug(f"检测区域 {area_name} 平均S值={avg_s:.1f}, 是否彩色={is_colorful}")
-
-            return is_colorful
-        except Exception as e:
-            log.error(f"检测按钮彩色失败: {e}")
-            return False
-
-    def _combine_and_save(self):
-        """拼接5张截图并保存"""
-        images = [
-            self._img_portrait,
-            self._img_name,
-            self._img_level,
-            self._img_skill,
-            self._img_core
-        ]
-
-        # 检查是否有缺失的截图
-        if any(img is None for img in images):
-            log.error("截图不完整，无法拼接保存")
-            return
-
-        # 上下拼接（使用黑边padding统一宽度）
-        max_width = max(img.shape[1] for img in images)
-
-        padded_images = []
-        for img in images:
-            if img.shape[1] < max_width:
-                pad_left = (max_width - img.shape[1]) // 2
-                pad_right = max_width - img.shape[1] - pad_left
-                padded = cv2.copyMakeBorder(
-                    img, 0, 0, pad_left, pad_right,
-                    cv2.BORDER_CONSTANT, value=0
-                )
-                padded_images.append(padded)
+            row_count += 1
+            if row_new == 0:
+                empty_rows += 1
+                log.debug(f'[角色扫描] 第{row}行无新角色（连续{empty_rows}行，已获得{row_owned}个）')
+                if empty_rows >= MAX_EMPTY_ROWS:
+                    break
             else:
-                padded_images.append(img)
+                empty_rows = 0
 
-        combined = np.vstack(padded_images)
+            ctrl.scroll(1, SCROLL_POS)
+            time.sleep(self.scroll_wait)
 
-        # 保存截图
-        self._save_screenshot(combined)
+        log.info(f'[角色扫描] 完成：已获得 {len(seen)} 个角色，扫描 {row_count} 行，'
+                 f'跳过未获得 {unowned} 个；未匹配名字 {unknown if unknown else "无"}')
+        return self.round_success('扫描完成')
 
-    def _save_screenshot(self, combined: MatLike):
-        """保存拼接后的截图并提交OCR任务"""
-        if self.screenshot_cache is None:
-            return
+    # ==================== 滚动与定位 ====================
 
+    def _goto_list_top(self) -> Optional[int]:
+        """滚到列表顶部并返回「已拥有」区首行中心 y；失败返回 None。
+
+        scroll 的正负方向实测与文档说明相反（负数才是向上），且不同基座实现
+        可能不一致，所以两个方向都试，用「顶部才有的独家频段/已拥有标签」判定。
+        """
+        for direction in (-SCROLL_STEP, SCROLL_STEP):
+            self._scroll_until_stable(direction)
+            ok, screen = self.ctx.controller.screenshot()
+            if not ok or screen is None:
+                continue
+            if not self._has_top_marker(screen):
+                log.debug('[角色扫描] 该边界没有顶部标签，换方向重试')
+                continue
+            centers = self._detect_row_centers(screen)
+            if not centers:
+                continue
+            # 顶部有「独家频段」时第一行是 UP 池且滚动时固定不动，必须跳过，
+            # 否则每轮都会重复读 UP 角色而漏掉「已拥有」区。
+            skip = self._has_up_block(screen) and len(centers) > 1
+            row_y = centers[1] if skip else centers[0]
+            log.info(f'[角色扫描] 已到列表顶部（方向 {"向上" if direction < 0 else "向下"}），'
+                     f'检测到 {len(centers)} 行，{"跳过 UP 行，" if skip else ""}首行中心 y={row_y}')
+            return row_y
+        return None
+
+    def _has_top_marker(self, screen: MatLike) -> bool:
+        """列表顶部才会出现「独家频段 / 已拥有」区块。"""
+        img = cv2_utils.crop_image_only(screen, TOP_MARK_BOX)
         try:
-            # 保存到代理人缓存（调试模式下会同时保存到文件）
-                        # 按内容去重保存 重扫产生的相同面板只入库一次
-            index, dup = self.screenshot_cache.save_unique('agent', combined)
-            self.screenshot_index = index + 1
-            if dup:
+            ocr_result = self.ctx.ocr.run_ocr(img)
+        except Exception:  # noqa: BLE001
+            return False
+        if not ocr_result:
+            return False
+        return any(('独家频段' in t) or ('已拥有' in t) for t in ocr_result)
+
+    def _has_up_block(self, screen: MatLike) -> bool:
+        """顶部是否还有「独家频段」UP 池区块。"""
+        img = cv2_utils.crop_image_only(screen, UP_MARK_BOX)
+        try:
+            ocr_result = self.ctx.ocr.run_ocr(img)
+        except Exception:  # noqa: BLE001
+            return False
+        if not ocr_result:
+            return False
+        return any('独家频段' in t for t in ocr_result)
+
+    def _scroll_until_stable(self, clicks: int) -> None:
+        """朝一个方向滚到边界（连续两帧网格一致即认为到底/到顶）。"""
+        prev: Optional[MatLike] = None
+        for _ in range(SCROLL_MAX_ROUNDS):
+            self.ctx.controller.scroll(clicks, SCROLL_POS)
+            time.sleep(SCROLL_SETTLE)
+            ok, cur = self.ctx.controller.screenshot()
+            if not ok or cur is None:
+                continue
+            if prev is not None and self._grid_similar(prev, cur):
                 return
+            prev = cur
 
-            # 提交OCR任务（异步处理）
-            if self.ocr_worker is not None:
-                self.ocr_worker.submit('agent', combined, self.parser)
-        except Exception as e:
-            log.error(f"保存截图失败: {e}")
-
-    def _is_end_of_list(self, screen: MatLike) -> bool:
-        """
-        检测是否到达列表末尾（检测标志点是否纯黑色）
-
-        Args:
-            screen: 当前截图
-        """
+    @staticmethod
+    def _grid_similar(a: MatLike, b: MatLike) -> bool:
+        """比较两帧网格区域是否几乎一致（判断滚动是否已到边界）。"""
         try:
-            area = self.ctx.screen_loader.get_area('代理人-信息', '代理人-有无标志')
-
-            # 获取标志点中心位置的颜色
-            x, y = int(area.center.x), int(area.center.y)
-            pixel = screen[y, x]
-
-            # 转换为HSV并获取V通道值
-            pixel_bgr = np.array([[pixel]], dtype=np.uint8)
-            pixel_hsv = cv2.cvtColor(pixel_bgr, cv2.COLOR_RGB2HSV)
-            v_value = int(pixel_hsv[0, 0, 2])
-
-            is_black = v_value < 10
-
-            return is_black
-        except Exception as e:
-            log.error(f"检测标志点失败: {e}")
+            ca = cv2_utils.crop_image_only(a, GRID_BOX)
+            cb = cv2_utils.crop_image_only(b, GRID_BOX)
+            if ca.shape != cb.shape:
+                return False
+            diff = np.abs(ca.astype(np.int16) - cb.astype(np.int16)).mean()
+            return bool(diff < 2.5)
+        except Exception:  # noqa: BLE001
             return False
 
-    def _is_area_black(self, screen: MatLike, screen_name: str, area_name: str) -> bool:
-        """
-        检测指定区域是否全黑（通过计算区域平均亮度）
-
-        Args:
-            screen: 当前截图
-            screen_name: 画面名称
-            area_name: 区域名称
-
-        Returns:
-            True 如果区域全黑（平均亮度<10），False 否则
-        """
+    @staticmethod
+    def _detect_row_centers(screen: MatLike) -> list[int]:
+        """在网格区域做纵向投影，返回可见卡片行的中心 y（自上而下）。"""
         try:
-            area = self.ctx.screen_loader.get_area(screen_name, area_name)
+            region = cv2_utils.crop_image_only(screen, GRID_BOX)
+            gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY).astype(np.float32)
+            prof = gray.mean(axis=1)
 
-            # 获取整个区域的图像
-            x1, y1 = int(area.rect.x1), int(area.rect.y1)
-            x2, y2 = int(area.rect.x2), int(area.rect.y2)
-            region = screen[y1:y2, x1:x2]
+            rows, start = [], None
+            for i, v in enumerate(prof):
+                if v >= 45:
+                    if start is None:
+                        start = i
+                else:
+                    if start is not None:
+                        if i - start >= 100:      # 卡片高度远大于标题栏/间隙
+                            rows.append((start, i))
+                        start = None
+            if start is not None and len(prof) - start >= 100:
+                rows.append((start, len(prof)))
+            return [int((top + bottom) / 2) + GRID_BOX.y1 for top, bottom in rows]
+        except Exception:  # noqa: BLE001
+            log.warning('[角色扫描] 行位置检测失败', exc_info=True)
+            return []
 
-            # 转换为HSV
-            region_hsv = cv2.cvtColor(region, cv2.COLOR_RGB2HSV)
+    # ==================== 信息读取 ====================
 
-            # 计算V通道的平均值
-            avg_v = int(region_hsv[:, :, 2].mean())
-
-            # 检测平均V通道是否小于10（全黑）
-            is_black = avg_v < 10
-
-            log.debug(f"检测区域 {area_name} 平均V值={avg_v}, 是否黑色={is_black}")
-
-            return is_black
-        except Exception as e:
-            log.error(f"检测区域黑色失败: {e}")
+    def _is_owned(self, screen: MatLike) -> bool:
+        """右侧「特训方案」位置有文字即已获得；未获得时该处是 EMPTY。"""
+        img = cv2_utils.crop_image_only(screen, OWNED_BOX)
+        try:
+            ocr_result = self.ctx.ocr.run_ocr(img)
+        except Exception as e:  # noqa: BLE001
+            log.error(f'[角色扫描] 持有状态 OCR 失败: {e}')
             return False
+        if not ocr_result:
+            return False
+        return any('特训' in text for text in ocr_result)
+
+    def _read_name(self, screen: MatLike) -> Optional[str]:
+        """裁剪右上角名字区域并 OCR，返回最长的中文串。"""
+        img = cv2_utils.crop_image_only(screen, NAME_BOX)
+        try:
+            ocr_result = self.ctx.ocr.run_ocr(img)
+        except Exception as e:  # noqa: BLE001
+            log.error(f'[角色扫描] 名字 OCR 失败: {e}')
+            return None
+
+        if not ocr_result:
+            return None
+
+        candidates = [
+            text for text in ocr_result
+            if any('\u4e00' <= ch <= '\u9fff' for ch in text)
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=len).strip()
+
+    def _read_level(self, screen: MatLike, col_idx: int) -> int:
+        """读卡片左下角的等级数字；读不到按满级 60 处理。"""
+        left = COL_LEFT[col_idx]
+        rect = Rect(left + LEVEL_DX[0], self._row_y + LEVEL_DY[0],
+                    left + LEVEL_DX[1], self._row_y + LEVEL_DY[1])
+        img = cv2_utils.crop_image_only(screen, rect)
+        try:
+            ocr_result = self.ctx.ocr.run_ocr(img)
+        except Exception:  # noqa: BLE001
+            return 60
+        if not ocr_result:
+            return 60
+
+        for text in ocr_result:
+            digits = ''.join(ch for ch in text if ch.isdigit() or ch in 'OoQq')
+            digits = digits.replace('O', '0').replace('o', '0').replace('Q', '0').replace('q', '0')
+            if len(digits) >= 2:
+                try:
+                    value = int(digits)
+                except ValueError:
+                    continue
+                if 1 <= value <= 80:
+                    return value
+        return 60
+
+    def _append_agent(self, key: str, level: int) -> None:
+        """按 ZOD 角色结构落数据；技能类字段攻略页看不到，给默认值。"""
+        self._counter += 1
+        level = max(1, min(level, 80))
+        promotion = max(0, level // 10 - 1)
+        agent_data = {
+            'key': key,
+            'level': level,
+            'core': 0,
+            'mindscape': 0,
+            'dodge': 1,
+            'basic': 1,
+            'chain': 1,
+            'special': 1,
+            'assist': 1,
+            'promotion': promotion,
+            'potential': 0,
+            'equippedDiscs': {},
+            'equippedWengine': '',
+            'id': f'zzz_agent_{self._counter}',
+        }
+        if self.ocr_worker is not None:
+            self.ocr_worker.scanned_agents.append(agent_data)
+        else:
+            log.debug(f'[角色扫描] 无 ocr_worker，角色数据仅记录日志: {agent_data}')

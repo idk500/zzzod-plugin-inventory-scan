@@ -175,6 +175,10 @@ class AgentParser:
         self._save_error(screenshot, f"未在翻译表中找到匹配: {best_name}", results)
         return best_name
 
+    def match_agent(self, ocr_name: str) -> Optional[str]:
+        """把 OCR 得到的角色中文名匹配成角色 code（供攻略页扫描器直接调用）。"""
+        return self._match_translation(ocr_name)
+
     def _match_translation(self, ocr_name: str, screenshot: Optional[MatLike] = None) -> Optional[str]:
         """
         在翻译表中匹配角色名称（使用模糊匹配）
