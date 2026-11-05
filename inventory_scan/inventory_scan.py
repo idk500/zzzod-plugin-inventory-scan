@@ -4,6 +4,7 @@ import subprocess
 import sys
 import time
 
+from one_dragon.base.geometry.rectangle import Rect
 from one_dragon.base.operation.application import application_const
 from one_dragon.base.operation.operation_edge import node_from
 from one_dragon.base.operation.operation_node import operation_node
@@ -25,6 +26,12 @@ from .wengine.wengine_scan_app import WengineScanApp
 from zzz_od.application.zzz_application import ZApplication
 from zzz_od.context.zzz_context import ZContext
 from zzz_od.operation.back_to_normal_world import BackToNormalWorld
+
+# 代理人详情页左上角「代理人攻略」入口。
+# 不写进画面定义：官仓的 代理人-信息 没有这个区域，靠插件增量合并会改写官仓跟踪文件
+# assets/game_data/screen_info/agent_info.yml，把 app 弄脏。这里只是个固定坐标，没必要
+# 为此污染工作目录。实测 OCR 文本 [251,35,377,66]，四周外扩得到该矩形。
+GUIDE_ENTRY_BOX = Rect(190, 15, 403, 77)
 
 
 class InventoryScanApp(ZApplication):
@@ -293,8 +300,7 @@ class InventoryScanApp(ZApplication):
             if not nav_result.is_success:
                 return nav_result
 
-        area = self.ctx.screen_loader.get_area('代理人-信息', '按钮-代理人攻略')
-        self.ctx.controller.click(area.center)
+        self.ctx.controller.click(GUIDE_ENTRY_BOX.center)
         time.sleep(1.0)
 
         screen = self.screenshot()
@@ -308,8 +314,7 @@ class InventoryScanApp(ZApplication):
     def _has_guide_entry(self, screen) -> bool:
         """代理人详情页左上角是否有「代理人攻略」入口按钮。"""
         try:
-            area = self.ctx.screen_loader.get_area('代理人-信息', '按钮-代理人攻略')
-            img = cv2_utils.crop_image_only(screen, area.rect)
+            img = cv2_utils.crop_image_only(screen, GUIDE_ENTRY_BOX)
             ocr_result = self.ctx.ocr.run_ocr(img)
         except Exception:  # noqa: BLE001
             return False
@@ -481,11 +486,12 @@ class InventoryScanApp(ZApplication):
             log.error(f'插件资产合并失败(识别功能可能降级),请检查工作目录 assets 写权限: {e}')
 
     def _merge_screen_info(self) -> None:
-        """把插件补充的仓库画面区域合并进工作目录 screen_info 并重载。
+        """把插件补充的画面区域增量合并进工作目录 screen_info 并重载。
 
-        官仓基座的 storage_drive_disc.yml 缺少 驱动盘仓库/驱动盘属性/驱动盘进度条
-        三个扫描依赖区域（zode 分支新增，见官仓 issue#4 系列）——缺了会导致
-        方格检测流水线取不到区域直接崩溃。按区域名做增量合并，不动官仓既有定义。
+        2026-11-06 整理后的现状：官仓基线已经有 仓库-驱动仓库 的全部区域
+        （驱动盘仓库/驱动盘属性/驱动盘进度条），这里的合并正常情况下是空操作，
+        只作为「官仓将来删掉这几个区域」的兜底。改动时保持空操作是硬要求——
+        一旦它真的写了文件，就说明官仓退化了，此时会改写 app 的跟踪文件。
         """
         import yaml
 
