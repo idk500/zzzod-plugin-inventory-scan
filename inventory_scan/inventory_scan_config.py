@@ -41,7 +41,7 @@ class InventoryScanConfig(ApplicationConfig):
 
     @property
     def auto_open_optimizer(self) -> bool:
-        """导出成功后自动打开输出文件夹并选中导出的 json（用户反馈只弹网站不知道干嘛）。分析器网址始终打在日志里"""
+        """导出成功后自动打开在线分析器网页，并弹出输出文件夹选中导出的 json（把文件拖进网页即可导入）"""
         return self.get('auto_open_optimizer', True)
 
     @auto_open_optimizer.setter

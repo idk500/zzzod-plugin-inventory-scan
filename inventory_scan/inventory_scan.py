@@ -403,7 +403,13 @@ class InventoryScanApp(ZApplication):
             return self.round_fail(f'导出失败: {e}')
 
     def _open_export(self, export_path: str) -> None:
-        """导出成功后在资源管理器中打开输出文件夹并选中 json（用户反馈只弹网站不知道返回了什么）"""
+        """导出成功后自动打开在线分析器网页 + 在资源管理器中选中 json，用户把文件拖进网页即可"""
+        try:
+            import webbrowser
+            if webbrowser.open('https://zzz.233618.xyz/'):
+                log.info('已自动打开在线分析器网页')
+        except Exception as e:
+            log.warning(f'自动打开分析器网页失败(不影响导出): {e}')
         try:
             if sys.platform == 'win32':
                 subprocess.Popen(['explorer', '/select,', os.path.normpath(export_path)])
