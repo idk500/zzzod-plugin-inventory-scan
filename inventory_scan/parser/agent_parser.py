@@ -192,6 +192,13 @@ class AgentParser:
         """
         # 使用翻译服务进行翻译（包含模糊匹配）
         translated = self.translation_service.translate_character(ocr_name, 'EN')
+
+        # 翻译表未收录的新角色由 name_to_code_override 直接给出 code。
+        # 这些 code 不在表里，走下面的反查会返回 None，导致新角色被当成「未匹配」丢掉
+        # （实测：蕾米埃尔/佩洛伊斯 翻译正确但扫描结果里没有这两个角色）。
+        if ocr_name in self.translation_service.name_to_code_override:
+            return translated
+
         character_dict = self.translation_service.translation_dict.get('character', {})
 
         # 新结构：key 是数字ID，需要在 value 中找 code/EN

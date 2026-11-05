@@ -21,6 +21,14 @@ class TranslationService:
         self.translation_dict: Optional[Dict] = None
 
         # 特殊名称映射（繁简转换等）
+        # 翻译表未收录的新角色：中文名直接映射到分析器使用的角色 code。
+        # 表数据 last_updated 2026-02-05，3.x 新角色不在其中（蕾米埃尔/佩洛伊斯等），
+        # 缺映射时模糊匹配会把它们错配到字符相近的旧角色（实测：蕾米埃尔→Koleda）。
+        self.name_to_code_override = {
+            '蕾米埃尔': 'Remielle',
+            '佩洛伊斯': 'Pyrois',
+        }
+
         self.special_name_mapping = {
             '賽斯': '赛斯',  # 繁体 -> 简体
             '賽斯・洛威尔': '赛斯',  # 繁体 -> 简体
@@ -92,7 +100,13 @@ class TranslationService:
         if not self.translation_dict:
             return name
 
-        # 0. 检查特殊名称映射（优先级最高）
+        # 0. 翻译表未收录的新角色，直接给 code（否则会走模糊匹配错配）
+        if category == 'character' and name in self.name_to_code_override:
+            code = self.name_to_code_override[name]
+            log.info(f'新角色映射: {name} -> {code}')
+            return code
+
+        # 0.1 检查特殊名称映射（优先级次之）
         if name in self.special_name_mapping:
             mapped_name = self.special_name_mapping[name]
             log.info(f"特殊名称映射: {name} -> {mapped_name}")
@@ -125,9 +139,9 @@ class TranslationService:
                 if trans_name == name:
                     return extract_translation(translations, target_lang, name)
 
-        # 3. 模糊匹配（相似度>0.2，取最接近的）
+        # 3. 模糊匹配（仅用于修正 OCR 误读，阈值与长度都收紧）
         best_match, confidence = self._fuzzy_match(name, category_dict)
-        if best_match and confidence > 0.2:
+        if best_match and confidence >= 0.5:
             log.info(f"模糊匹配: {name} -> {best_match} (置信度: {confidence:.4f})")
             return extract_translation(category_dict[best_match], target_lang, name)
         else:
@@ -151,25 +165,22 @@ class TranslationService:
         best_match = None
         best_ratio = 0.0
 
-        # 收集所有可能的匹配候选
+        # 只比较中文名与英文名。翻译表里还有 desc / 皮肤描述等长文本，
+        # 一并参与比较会让短名字（如「雅」）在长描述里意外拿到高分。
         candidates = []
         for key, translations in category_dict.items():
-            candidates.append((key, key))  # 英文key
-            # 检查 translations 是否是字典类型
             if not isinstance(translations, dict):
                 continue
-            for lang, trans_name in translations.items():
-                # 确保 trans_name 是字符串
-                if isinstance(trans_name, str):
-                    candidates.append((key, trans_name))  # 各语言翻译
-                elif isinstance(trans_name, dict):
-                    # 新格式：trans_name 是字典 {"name": "..."}
-                    name_text = trans_name.get('name', '')
-                    if name_text:
-                        candidates.append((key, name_text))
+            for lang in ('CHS', 'EN'):
+                value = translations.get(lang)
+                if isinstance(value, str) and value:
+                    candidates.append((key, value))
 
         # 计算相似度
         for key, candidate in candidates:
+            # 长度差超过 1 的不可能是同名的 OCR 误读，直接跳过（避免「佩洛伊斯」命中「赛斯」）
+            if abs(len(candidate) - len(name)) > 1:
+                continue
             ratio = difflib.SequenceMatcher(None, name, candidate).ratio()
             if ratio > best_ratio:
                 best_ratio = ratio
