@@ -3,8 +3,8 @@
   "name": "仓库扫描器",
   "summary": "自动翻页扫描仓库中的代理人/驱动盘/音擎并 OCR 导出清单（输出到一条龙安装目录 .debug/inventory_exports，导出后自动打开文件夹并选中 json；大仓库有进度日志，中断也会存部分数据）。可导入在线分析器 zzz.233618.xyz。",
   "cover": "assets/ui/cover.png",
-  "version": "1.4.3",
-  "versionCode": 30,
+  "version": "1.4.4",
+  "versionCode": 31,
   "defaultGroup": true,
   "needNotify": true,
   "author": {

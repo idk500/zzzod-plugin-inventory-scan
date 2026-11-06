@@ -141,7 +141,7 @@ class TranslationService:
 
         # 3. 模糊匹配（仅用于修正 OCR 误读，阈值与长度都收紧）
         best_match, confidence = self._fuzzy_match(name, category_dict)
-        if best_match and confidence >= 0.5:
+        if best_match and confidence >= 0.6:
             log.info(f"模糊匹配: {name} -> {best_match} (置信度: {confidence:.4f})")
             return extract_translation(category_dict[best_match], target_lang, name)
         else:
@@ -173,6 +173,9 @@ class TranslationService:
                 continue
             for lang in ('CHS', 'EN'):
                 value = translations.get(lang)
+                # 新格式: 值是字典 {"name": ..., "desc2": ...}，取 name 参与匹配
+                if isinstance(value, dict):
+                    value = value.get('name')
                 if isinstance(value, str) and value:
                     candidates.append((key, value))
 
