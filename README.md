@@ -2,11 +2,13 @@
 
 仓库扫描器 —— 绝区零一条龙插件：自动翻页扫描仓库中的代理人 / 驱动盘 / 音擎，OCR 识别并导出清单。
 
+> **原作声明**：仓库扫描器最初由 **[kawayiYokami](https://github.com/kawayiYokami)** 创作——2026-02-05 起，以「feat: 扫描主体」为首的 13 笔提交（扫描主体、一条龙 GUI、数据自动更新、装备在代理人身上、OCR 并发鲁棒性等）构筑了扫描器本体，配套分析器 [kawayiYokami/zzz_optimizer](https://github.com/kawayiYokami/zzz_optimizer) 亦为 TA 的作品。本仓库系 2026-10 由 idk500 从一条龙基座迁移出的独立插件形态（迁移、适配与后续维护），原设计的核心功劳归 kawayiYokami。
+
 - 输出目录：**一条龙安装目录**下的 `.debug\inventory_exports`（例：`D:\ZenlessZoneZero-OneDragon\.debug\inventory_exports`，不是插件目录；导出成功后自动打开在线分析器网页 zzz.233618.xyz，并弹出文件夹选中 json，把文件拖进网页即可）
 - 路径约定：本文档其余所有 `.debug/...` 相对路径（诊断截图等）同样以**一条龙安装目录**为基准
 - 大仓库提示：每页 36 盘约 1 分钟，2000+ 盘需要半小时以上，日志有 `[进度]` 行，不是卡死；中途手动停止也会把已扫到的部分数据存为 `inventory_partial_*.json`
 - 安装：插件管理导入 zip，或待官方 plugin-data 收录后自动同步
-- 许可：GPL-3.0（衍生自主仓）
+- 许可：GPL-3.0（衍生自一条龙基座，原作 kawayiYokami，署名保留）
 
 ## 运行产物与主仓 Git 干净承诺（v1.4.6 起）
 

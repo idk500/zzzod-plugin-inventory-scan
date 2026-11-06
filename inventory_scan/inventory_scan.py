@@ -1,3 +1,9 @@
+"""仓库扫描器插件。
+
+原作：kawayiYokami（2026-02，一条龙基座内置扫描器 13 笔提交，含配套分析器
+github.com/kawayiYokami/zzz_optimizer）；本独立插件由 idk500 于 2026-10 从基座
+迁移适配并维护。GPL-3.0，原作署名保留。
+"""
 import json
 import os
 import shutil
