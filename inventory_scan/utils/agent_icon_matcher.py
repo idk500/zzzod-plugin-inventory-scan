@@ -21,7 +21,8 @@ class AgentIconMatcher:
     """代理人头像匹配器"""
 
     def __init__(self, save_debug_images: bool = True):
-        self.icon_dir = os_utils.get_path_under_work_dir('assets', 'wiki_data', 'icons')
+        from ..plugin_workspace import plugin_wiki_dir
+        self.icon_dir = os.path.join(plugin_wiki_dir(), 'icons')
         self.icon_cache: Dict[str, MatLike] = {}
         self.translation_dict: Dict = {}
         self.save_debug_images = save_debug_images
@@ -49,7 +50,8 @@ class AgentIconMatcher:
 
     def _load_translation_dict(self):
         """加载翻译字典"""
-        dict_path = os_utils.get_path_under_work_dir('assets', 'wiki_data', 'zzz_translation.json')
+        from ..plugin_workspace import plugin_wiki_dir
+        dict_path = os.path.join(plugin_wiki_dir(), 'zzz_translation.json')
         try:
             if os.path.exists(dict_path):
                 import json

@@ -22,9 +22,10 @@ class TranslationUpdater:
     _failed_this_run = False
 
     def __init__(self):
-        # 保存原始JSON到 assets/wiki_data
+        # 保存原始JSON到 plugin_data/wiki_data（2026-11-06 迁出主仓 assets，避免 git 污染）
+        from ..plugin_workspace import plugin_wiki_dir
         self.dict_path = os.path.join(
-            os_utils.get_path_under_work_dir('assets', 'wiki_data'),
+            plugin_wiki_dir(),
             'zzz_translation.json'
         )
 

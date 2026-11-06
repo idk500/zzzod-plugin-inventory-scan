@@ -41,14 +41,15 @@ class IconDownloader:
     _failed_this_run = False
 
     def __init__(self):
-        # 图标保存路径：assets/wiki_data/icons/
+        # 图标保存路径：plugin_data/wiki_data/icons/（2026-11-06 迁出主仓 assets，避免 git 污染）
+        from ..plugin_workspace import plugin_wiki_dir
         self.icons_dir = os.path.join(
-            os_utils.get_path_under_work_dir('assets', 'wiki_data'),
+            plugin_wiki_dir(),
             'icons'
         )
         # 翻译数据路径
         self.translation_path = os.path.join(
-            os_utils.get_path_under_work_dir('assets', 'wiki_data'),
+            plugin_wiki_dir(),
             'zzz_translation.json'
         )
 

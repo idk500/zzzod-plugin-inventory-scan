@@ -11,9 +11,10 @@ class TranslationService:
     """翻译服务"""
 
     def __init__(self):
-        # 从 assets/wiki_data 读取字典
+        # 从 plugin_data/wiki_data 读取字典（2026-11-06 迁出主仓 assets，避免 git 污染）
+        from ..plugin_workspace import plugin_wiki_dir
         self.user_dict_path = os.path.join(
-            os_utils.get_path_under_work_dir('assets', 'wiki_data'),
+            plugin_wiki_dir(),
             'zzz_translation.json'
         )
         # 本项目只有一份字典：config/zzz_translation.json

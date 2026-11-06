@@ -53,6 +53,8 @@ class InventoryScanApp(ZApplication):
         self._scan_drive_disk: bool = self.config.scan_drive_disk
         self._scan_wengine: bool = self.config.scan_wengine
         self._scan_agent: bool = self.config.scan_agent
+        # 注入资产登记器（_ensure_plugin_assets 内赋值；预置 None 供异常兜底）
+        self._injected = None
         self._ensure_plugin_assets()
 
         self.screenshots_dir = os_utils.get_path_under_work_dir('.debug', 'inventory_screenshots')
@@ -516,11 +518,145 @@ class InventoryScanApp(ZApplication):
     def _ensure_plugin_assets(self) -> None:
         """插件自带资产合并到工作目录 识别管线与 wiki 图标库供框架按工作目录路径加载"""
         try:
+            # 2026-11-06 用户反馈：插件产物把主仓 git 弄脏。先清上次强杀残留，
+            # 再注入（全部登记清单），进程退出时 atexit 自动恢复删除。
+            from .plugin_workspace import InjectedAssets
+            self._injected = InjectedAssets('inventory_scan')
+            self._injected.restore_previous()
+            self._migrate_legacy_wiki_data()
+            self._reclaim_owned_files()
+            self._reverse_merge_residue()
             self._copy_plugin_assets()
             self._merge_screen_info()
+            self._injected.register_exit_cleanup()
         except Exception as e:
             # 真·只读安装/杀软锁定等环境问题:不裸崩,记录后继续(管线缺失会导致识别降级,但应用仍可启动)
             log.error(f'插件资产合并失败(识别功能可能降级),请检查工作目录 assets 写权限: {e}')
+
+    # 插件完全拥有的注入文件（官仓基线没有这些文件名）：与插件源内容一致但不在
+    # 清单里的，必然是旧版插件注入后的残留（旧版不登记），收编删除后走正常注入。
+    _OWNED_RELS = (
+        'assets/image_analysis_pipelines/已选中的驱动盘.yml',
+        'assets/image_analysis_pipelines/驱动盘属性识别.yml',
+        'assets/image_analysis_pipelines/驱动盘方格.yml',
+        'assets/image_analysis_pipelines/驱动盘进度条检测.yml',
+        'assets/game_data/screen_info/agent_info.yml',
+        'assets/game_data/screen_info/agent_list.yml',
+    )
+
+    def _git_tracked(self, rel: str) -> bool:
+        """判断相对路径是否被主仓 git 跟踪。探测失败(无 git/非仓库)按未跟踪处理。"""
+        try:
+            import subprocess as sp
+            r = sp.run(['git', 'ls-files', '--', rel], cwd=os_utils.get_work_dir(),
+                       capture_output=True, timeout=5)
+            return bool(r.stdout.strip())
+        except Exception:
+            return False
+
+    def _reclaim_owned_files(self) -> None:
+        """收编旧版插件注入的残留：这些文件名官仓基线不会有，只要存在且未被
+        git 跟踪就必是旧版注入残留（旧版不登记、退出不清理），删除后由正常
+        注入重新复制并登记（退出时删除）。基线 git 已跟踪的同名文件不动，
+        保证退出清理永不删基线文件。"""
+        plugin_assets = Path(__file__).parent / 'assets'
+        src_map = {
+            f'assets/image_analysis_pipelines/{p.name}': p
+            for p in (plugin_assets / 'image_analysis_pipelines').iterdir()
+        }
+        src_map.update({
+            f'assets/game_data/screen_info/{p.name}': p
+            for p in (plugin_assets / 'screen_info').glob('*.yml')
+        })
+        work_dir = os_utils.get_work_dir()
+        for rel in self._OWNED_RELS:
+            src = src_map.get(rel)
+            if src is None:
+                continue
+            target = Path(work_dir) / rel
+            if not target.exists() or self._git_tracked(rel):
+                continue
+            try:
+                target.unlink()
+                log.info(f'已收编旧版插件残留: {rel}（本轮重新注入并在退出时清理）')
+            except Exception as e:
+                log.warning(f'残留收编失败(不影响功能): {rel}: {e}')
+
+    @staticmethod
+    def _file_hash(path: Path) -> str:
+        with path.open('rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    def _reverse_merge_residue(self) -> None:
+        """逆向剔除旧版插件增量合并进官方 screen_info 文件的区域（清单外残留）。
+
+        合并操作只做 area_list extend，因此「文件含插件版独有 area_name」⇔
+        「被合并过」；剔除这些条目即还原。若官仓本就有同名区域，当初合并
+        不会 extend，也不会写文件，不会被误剔。剔除后 _merge_screen_info
+        会重新走「备份→合并→登记→退出恢复」的正轨。
+        """
+        import yaml
+        plugin_screen_dir = Path(__file__).parent / 'assets' / 'screen_info'
+        if not plugin_screen_dir.exists():
+            return
+        work_dir = os_utils.get_work_dir()
+        for yml in plugin_screen_dir.glob('*.yml'):
+            rel = f'assets/game_data/screen_info/{yml.name}'
+            target = Path(work_dir) / rel
+            if not target.exists() or self._git_tracked(rel):
+                continue  # tracked 基线文件由备份-恢复机制兜底，剔除只服务未跟踪场景
+            try:
+                with yml.open(encoding='utf-8') as f:
+                    plugin_data = yaml.safe_load(f)
+                if not isinstance(plugin_data, dict):
+                    continue
+                plugin_names = {a.get('area_name') for a in plugin_data.get('area_list', []) if isinstance(a, dict)}
+                with target.open(encoding='utf-8') as f:
+                    base_data = yaml.safe_load(f)
+                if not isinstance(base_data, dict):
+                    continue
+                area_list = base_data.get('area_list')
+                if not isinstance(area_list, list):
+                    continue
+                kept = [a for a in area_list if not (isinstance(a, dict) and a.get('area_name') in plugin_names)]
+                if len(kept) == len(area_list):
+                    continue  # 无合并痕迹
+                # 只剔除插件会带的区域，且剔除条件加严：该区域与插件版定义完全一致
+                # （矩形/文本相同），防止误剔官仓自己演进出来的同名不同义区域。
+                plugin_defs = {a.get('area_name'): a for a in plugin_data.get('area_list', []) if isinstance(a, dict)}
+                removed = [a for a in area_list if isinstance(a, dict) and a.get('area_name') in plugin_names
+                           and {k: v for k, v in a.items() if k != 'goto_list'} ==
+                           {k: v for k, v in (plugin_defs.get(a.get('area_name')) or {}).items() if k != 'goto_list'}]
+                if not removed:
+                    continue
+                base_data['area_list'] = [a for a in area_list if a not in removed]
+                with target.open('w', encoding='utf-8') as f:
+                    yaml.safe_dump(base_data, f, allow_unicode=True, sort_keys=False)
+                log.info(f'已剔除旧版插件合并残留: {rel} (-{len(removed)} 区域)')
+            except Exception as e:
+                log.warning(f'合并残留剔除失败(不影响功能): {yml.name}: {e}')
+
+    def _migrate_legacy_wiki_data(self) -> None:
+        """老版本把 wiki 图标库复制进了主仓 assets/wiki_data（git 脏文件源头），
+        迁移到 plugin_data（.gitignore 已覆盖），并删除主仓里的旧目录。"""
+        from .plugin_workspace import plugin_wiki_dir
+        legacy = Path(os_utils.get_path_under_work_dir('assets', 'wiki_data'))
+        if not legacy.exists():
+            return
+        dst = Path(plugin_wiki_dir())
+        try:
+            dst.mkdir(parents=True, exist_ok=True)
+            for item in legacy.iterdir():
+                target = dst / item.name
+                if not target.exists():
+                    if item.is_dir():
+                        shutil.copytree(item, target, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(item, target)
+            shutil.rmtree(legacy)
+            log.info('已迁移 wiki 图标库到 plugin_data（主仓 assets/wiki_data 清除）')
+        except Exception as e:
+            log.warning(f'wiki 图标库迁移失败(不影响功能): {e}')
 
     def _merge_screen_info(self) -> None:
         """把插件补充的画面区域增量合并进工作目录 screen_info 并重载。
@@ -558,8 +694,18 @@ class InventoryScanApp(ZApplication):
                     continue
                 base_data.setdefault('area_list', []).extend(missing)
                 merged = base_data
+                existed = True
             else:
                 merged = plugin_data
+                existed = False
+
+            # 登记必须先于写文件：备份的是改写前的原件，退出时才恢复得回去
+            rel = f'assets/game_data/screen_info/{yml.name}'
+            if self._injected is not None:
+                if existed:
+                    self._injected.register_merge(rel)
+                else:
+                    self._injected.register_create(rel)
 
             with target.open('w', encoding='utf-8') as f:
                 yaml.safe_dump(merged, f, allow_unicode=True, sort_keys=False)
@@ -574,6 +720,7 @@ class InventoryScanApp(ZApplication):
                 log.warning(f'screen_loader 重载失败（重启应用后生效）: {e}')
 
     def _copy_plugin_assets(self) -> None:
+        from .plugin_workspace import plugin_wiki_dir
         plugin_assets = Path(__file__).parent / "assets"
         dst_pipelines = Path(os_utils.get_path_under_work_dir("assets", "image_analysis_pipelines"))
         dst_pipelines.mkdir(parents=True, exist_ok=True)
@@ -581,7 +728,12 @@ class InventoryScanApp(ZApplication):
             target = dst_pipelines / yml.name
             if not target.exists():
                 shutil.copy2(yml, target)
-        dst_wiki = Path(os_utils.get_path_under_work_dir("assets", "wiki_data"))
+                # 框架硬编码从工作目录加载管线（cv_service.PIPELINE_DIR），只能注入；
+                # 登记后进程退出时删除，git 保持干净
+                if self._injected is not None:
+                    self._injected.register_create(f'assets/image_analysis_pipelines/{yml.name}')
+        # wiki 图标库不再进主仓 assets（2026-11-06 用户反馈 git 污染），放 plugin_data
+        dst_wiki = Path(plugin_wiki_dir())
         dst_wiki.mkdir(parents=True, exist_ok=True)
         for item in (plugin_assets / "wiki_data").iterdir():
             target = dst_wiki / item.name
