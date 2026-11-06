@@ -8,6 +8,7 @@ from one_dragon.base.geometry.rectangle import Rect
 from one_dragon.base.operation.application import application_const
 from one_dragon.base.operation.operation_edge import node_from
 from one_dragon.base.operation.operation_node import operation_node
+from one_dragon.base.operation.operation_base import OperationResult
 from one_dragon.base.operation.operation_round_result import OperationRoundResult
 from one_dragon.utils import cv2_utils, os_utils
 from one_dragon.utils.log_utils import log
@@ -65,6 +66,23 @@ class InventoryScanApp(ZApplication):
         self.drive_disk_scanner = DriveDiskScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
         self.wengine_scanner = WengineScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
         self.agent_scanner = AgentScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
+
+    def after_operation_done(self, result: OperationResult) -> None:
+        """兜底导出：人工停止/超时/导航失败都可能绕过节点内的 partial 导出。
+
+        partial 导出原本只挂在三个扫描节点的 fail 分支上；但停止信号若在
+        导航节点或主循环轮间被捕获，框架直接 op_fail('人工结束') break，
+        已扫到的数据同样会丢（issue#6 补充）。应用收尾无论成功失败停止
+        都会经过这里：成功且已完整导出则跳过，否则丢弃 OCR 队列中未处理
+        任务，把已完成的结果落盘为 partial 文件。
+        """
+        try:
+            if result is not None and result.success:
+                return  # 完整导出节点已跑过
+            self.ocr_worker.stop()
+            self._export_partial_on_abort()
+        finally:
+            super().after_operation_done(result)
 
     @operation_node(name='开始前返回', is_start_node=True)
     def back_at_first(self) -> OperationRoundResult:
