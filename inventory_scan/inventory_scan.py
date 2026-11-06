@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -66,6 +67,21 @@ class InventoryScanApp(ZApplication):
         self.drive_disk_scanner = DriveDiskScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
         self.wengine_scanner = WengineScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
         self.agent_scanner = AgentScanApp(ctx, screenshot_cache=self.screenshot_cache, ocr_worker=self.ocr_worker)
+
+    def _ensure_screen_areas(self) -> None:
+        """自愈：框架随时可能无参 reload() 把插件合并区域冲掉。
+
+        实测时序（2026-11-06 10:56 E2E）：插件 __init__ 合并+reload 后 5 区域生效；
+        但 10 秒后框架重新发现应用并调用无参 reload()（读 _od_merged.yml），
+        插件区域全部消失 → 方格检测流水线报「未找到区域」。
+        注入式（plugins/<pkg>/screen_info/）不可用：官仓已有同名画面会被
+        「名称冲突已跳过」挡住。所以只能在节点执行前检测并从分离文件重载。
+        """
+        loader = self.ctx.screen_loader
+        if loader.get_area('仓库-驱动仓库', '驱动盘仓库') is not None:
+            return
+        log.warning('插件画面区域被框架 reload 冲掉，从分离文件重新加载')
+        loader.reload(from_separated_files=True)
 
     def after_operation_done(self, result: OperationResult) -> None:
         """兜底导出：人工停止/超时/导航失败都可能绕过节点内的 partial 导出。
@@ -154,6 +170,7 @@ class InventoryScanApp(ZApplication):
         """
         if not self._scan_drive_disk:
             return self.round_success('跳过驱动盘')
+        self._ensure_screen_areas()
         fail_reason = goto_drive_warehouse(self, self.round_by_goto_screen)
         if fail_reason is None:
             return self.round_success('已到达驱动仓库')
@@ -166,6 +183,7 @@ class InventoryScanApp(ZApplication):
         if not self._scan_drive_disk:
             log.debug("已跳过驱动盘扫描")
             return self.round_success('驱动盘已跳过')
+        self._ensure_screen_areas()
         log.debug("开始扫描驱动盘...")
         self._disc_game_total = self._ocr_disc_total()
         result = self.drive_disk_scanner.execute()
@@ -238,6 +256,7 @@ class InventoryScanApp(ZApplication):
         音擎页签（免去返回大世界的长路径）；其它画面才走原逃逸+基座路由。
         """
         self.ocr_worker.pause()
+        self._ensure_screen_areas()
         if not self._scan_wengine:
             self.ocr_worker.resume()
             return self.round_success('跳过音擎')
@@ -273,6 +292,7 @@ class InventoryScanApp(ZApplication):
         if not self._scan_wengine:
             log.debug("已跳过音擎扫描")
             return self.round_success('音擎已跳过')
+        self._ensure_screen_areas()
         log.debug("开始扫描音擎...")
         result = self.wengine_scanner.execute()
         if result.success:
@@ -300,6 +320,7 @@ class InventoryScanApp(ZApplication):
            页签，只能用来判断「已经在攻略页」。
         """
         self.ocr_worker.pause()
+        self._ensure_screen_areas()
         if not self._scan_agent:
             self.ocr_worker.resume()
             return self.round_success('跳过角色')
@@ -372,6 +393,7 @@ class InventoryScanApp(ZApplication):
         if not self._scan_agent:
             log.debug("已跳过角色扫描")
             return self.round_success('角色已跳过')
+        self._ensure_screen_areas()
         log.debug("开始扫描角色...")
         result = self.agent_scanner.execute()
         if result.success:
@@ -400,9 +422,6 @@ class InventoryScanApp(ZApplication):
     @operation_node(name='导出完整数据')
     def export_all_data(self) -> OperationRoundResult:
         """导出所有扫描数据到一个JSON文件"""
-        import json
-        import time
-
         try:
             export_dir = os_utils.get_path_under_work_dir('.debug', 'inventory_exports')
             os.makedirs(export_dir, exist_ok=True)
