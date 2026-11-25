@@ -47,6 +47,7 @@ class DriveDiskParser:
         '电': 'electric_dmg_',
         '以太': 'ether_dmg_',
         '物理': 'physical_dmg_',
+        '风': 'wind_dmg_',
     }
 
     # 副属性映射
